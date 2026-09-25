@@ -40,12 +40,15 @@ else:
     ultimo = df_telemetria.iloc[-1]
     merma_actual = ((ultimo['peso_inicial'] - ultimo['peso_actual']) / ultimo['peso_inicial']) * 100
 
-    # 1. KPIs Generales
-    c1, c2, c3, c4 = st.columns(4)
+   # 1. KPIs Generales (Ahora con 5 columnas)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("🌡️ Temp. Sala", f"{ultimo['temp_sala']:.1f} °C")
-    c2.metric("💧 Humedad Sala", f"{ultimo['hum_sala']:.1f} %")
-    c3.metric("🎯 Temp. Núcleo", f"{ultimo['temp_int']:.1f} °C")
-    c4.metric("📉 Merma Actual", f"{merma_actual:.1f} %", f"{ultimo['peso_actual']:.2f} Kg")
+    c2.metric("💧 Humedad", f"{ultimo['hum_sala']:.1f} %")
+    c3.metric("🎯 Núcleo", f"{ultimo['temp_int']:.1f} °C")
+    c4.metric("🔦 Superficie (IR)", f"{ultimo['temp_sup']:.1f} °C")
+    
+    # Peso actual como métrica principal, merma como indicador secundario (delta)
+    c5.metric("⚖️ Peso Actual", f"{ultimo['peso_actual']:.2f} Kg", f"-{merma_actual:.1f}% Merma", delta_color="inverse")
 
     st.markdown("---")
     st.subheader("🚦 Semáforos Prescriptivos Bromatológicos")
