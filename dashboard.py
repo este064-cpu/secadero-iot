@@ -3,8 +3,15 @@ import pandas as pd
 import plotly.express as px
 from supabase import create_client
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Secadero IoT", layout="wide")
+
+# ==========================================
+# AUTO-ACTUALIZACIÓN
+# ==========================================
+# Recarga la página sola cada 60 segundos (60000 milisegundos)
+st_autorefresh(interval=60000, key="recarga_automatica")
 
 SUPABASE_URL = "https://esdlelzxxcqavbwfqbti.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzZGxlbHp4eGNxYXZid2ZxYnRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzNDUyMTEsImV4cCI6MjEwNTkyMTIxMX0.RWKWFl344RC8_aayTUF32-6JMaCw3YeMwfszpfx4I5Q"  # ¡Pegá tu clave acá!
@@ -39,21 +46,17 @@ df_telemetria = cargar_telemetria()
 with st.sidebar:
     st.header("📦 Gestión de Lotes")
     
-    # Formulario para Iniciar un Lote Nuevo
     with st.expander("➕ Iniciar Nuevo Lote"):
         with st.form("form_nuevo_lote"):
             nuevo_nombre = st.text_input("Nombre del Lote (Ej: Tanda-Abril-01)")
             nuevo_peso = st.number_input("Peso Inicial Total (Kg)", min_value=0.1, value=10.0)
             if st.form_submit_button("Crear Lote"):
-                # Primero, marcamos todos los lotes anteriores como "Finalizado"
                 supabase.table("lotes").update({"estado": "Finalizado"}).neq("estado", "Finalizado").execute()
-                # Insertamos el nuevo lote activo
                 supabase.table("lotes").insert({"nombre": nuevo_nombre, "peso_inicial": nuevo_peso, "estado": "Activo"}).execute()
                 st.success("Lote creado!")
                 st.cache_data.clear()
                 st.rerun()
 
-    # Identificar el Lote Activo
     if not df_lotes.empty:
         lotes_activos = df_lotes[df_lotes['estado'] == 'Activo']
         if not lotes_activos.empty:
@@ -69,7 +72,6 @@ with st.sidebar:
     st.markdown("---")
     st.header("📝 Carga Manual (pH)")
     
-    # Formulario de pH con Fecha y Hora personalizada
     with st.form("form_bromatologia"):
         st.write("Registrar medición de pH")
         fecha_ph = st.date_input("Fecha de medición", value=datetime.today())
@@ -79,19 +81,18 @@ with st.sidebar:
         
         if st.form_submit_button("Guardar Registro"):
             if lote_actual is not None:
-                # Combinar fecha y hora seleccionada
                 fecha_hora_combinada = datetime.combine(fecha_ph, hora_ph).isoformat()
-                
                 nuevo_registro = {
                     "lote": lote_actual['nombre'],
                     "peso_inicial": lote_actual['peso_inicial'],
                     "ph": ph_val,
                     "notas": notas,
-                    "fecha_hora": fecha_hora_combinada  # Forzamos la fecha histórica
+                    "fecha_hora": fecha_hora_combinada
                 }
                 supabase.table("secado").insert(nuevo_registro).execute()
                 st.success("✅ Guardado correctamente")
                 st.cache_data.clear()
+                st.rerun()
             else:
                 st.error("Creá un lote activo primero.")
 
@@ -111,7 +112,6 @@ st.title("🥩 Panel de Control Industrial - Secadero")
 if df_telemetria.empty or lote_actual is None:
     st.warning("⏳ Esperando telemetría o creación de Lote...")
 else:
-    # Filtramos la telemetría para mostrar solo los datos desde que inició el lote activo
     df_lote_activo = df_telemetria[df_telemetria['fecha_hora'] >= lote_actual['fecha_inicio']]
     
     if not df_lote_activo.empty:
@@ -119,7 +119,6 @@ else:
         peso_ref = lote_actual['peso_inicial']
         merma_actual = ((peso_ref - ultimo['peso_actual']) / peso_ref) * 100 if peso_ref > 0 else 0
 
-        # KPIs
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("🌡️ Temp. Sala", f"{ultimo['temp_sala']:.1f} °C")
         c2.metric("💧 Humedad", f"{ultimo['hum_sala']:.1f} %")
@@ -129,29 +128,52 @@ else:
 
         st.markdown("---")
         
-        # Pestañas de Visualización
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "Temperaturas", "Humedad", "Merma de Peso", "Evolución de pH", "🗄️ Historial de Lotes"
         ])
         
-        df_graficos = df_lote_activo.dropna(subset=['temp_sala'])
+        # Preparamos los datos para gráficos (limpiando nombres)
+        df_graficos = df_lote_activo.dropna(subset=['temp_sala']).copy()
+        df_graficos = df_graficos.rename(columns={
+            'fecha_hora': 'Fecha y hora',
+            'temp_sala': 'Temp sala',
+            'temp_int': 'Temp núcleo',
+            'temp_sup': 'Temp superficie',
+            'hum_sala': 'Humedad',
+            'peso_actual': 'Peso actual'
+        })
 
         with tab1:
-            st.plotly_chart(px.line(df_graficos, x='fecha_hora', y=['temp_sala', 'temp_int', 'temp_sup']), use_container_width=True)
+            st.plotly_chart(px.line(df_graficos, x='Fecha y hora', y=['Temp sala', 'Temp núcleo', 'Temp superficie'], 
+                                    labels={'value': 'Temperatura (°C)', 'variable': 'Sensor'}), use_container_width=True)
         with tab2:
-            st.plotly_chart(px.line(df_graficos, x='fecha_hora', y='hum_sala', color_discrete_sequence=['#00a8ff']), use_container_width=True)
+            st.plotly_chart(px.line(df_graficos, x='Fecha y hora', y='Humedad', color_discrete_sequence=['#00a8ff']), use_container_width=True)
         with tab3:
-            st.plotly_chart(px.line(df_graficos, x='fecha_hora', y='peso_actual', color_discrete_sequence=['#e84118']), use_container_width=True)
+            st.plotly_chart(px.line(df_graficos, x='Fecha y hora', y='Peso actual', color_discrete_sequence=['#e84118']), use_container_width=True)
         with tab4:
-            df_ph = df_lote_activo.dropna(subset=['ph'])
+            df_ph = df_lote_activo.dropna(subset=['ph']).copy()
             if not df_ph.empty:
-                # Ordenamos por si cargaste un pH de ayer después de uno de hoy
                 df_ph = df_ph.sort_values(by='fecha_hora')
-                st.plotly_chart(px.line(df_ph, x='fecha_hora', y='ph', markers=True, color_discrete_sequence=['#9c88ff']), use_container_width=True)
+                df_ph = df_ph.rename(columns={'fecha_hora': 'Fecha y hora', 'ph': 'pH'})
+                st.plotly_chart(px.line(df_ph, x='Fecha y hora', y='pH', markers=True, color_discrete_sequence=['#9c88ff']), use_container_width=True)
             else:
                 st.info("Aún no hay registros de pH para este lote.")
         with tab5:
             st.subheader("Historial de Producción")
-            st.dataframe(df_lotes, use_container_width=True)
+            # Preparamos la tabla de lotes para que se vea prolija
+            df_lotes_mostrar = df_lotes.copy()
+            # Ocultamos la columna ID que no suma visualmente
+            df_lotes_mostrar = df_lotes_mostrar.drop(columns=['id'])
+            # Formateamos la fecha (Año-Mes-Día Hora:Minuto)
+            df_lotes_mostrar['fecha_inicio'] = pd.to_datetime(df_lotes_mostrar['fecha_inicio']).dt.strftime('%Y-%m-%d %H:%M')
+            # Renombramos las columnas
+            df_lotes_mostrar = df_lotes_mostrar.rename(columns={
+                'nombre': 'Nombre',
+                'peso_inicial': 'Peso inicial (Kg)',
+                'fecha_inicio': 'Fecha inicio',
+                'estado': 'Estado'
+            })
+            # Mostramos la tabla (hide_index saca el número de fila de la izquierda)
+            st.dataframe(df_lotes_mostrar, use_container_width=True, hide_index=True)
     else:
          st.info("Lote creado correctamente. Esperando los primeros datos del ESP32...")
