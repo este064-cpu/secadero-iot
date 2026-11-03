@@ -1,0 +1,8 @@
+# Claves. NUNCA van al repo: este repo es publico.
+.streamlit/secrets.toml
+.env
+.env.*
+
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,28 @@
+name: Vigilar el secadero
+
+# Corre sola cada 5 minutos, sin que haya ninguna PC prendida.
+# "workflow_dispatch" ademas deja correrla a mano desde la pestaña Actions
+# de GitHub, para probar que los mails llegan.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install supabase
+
+      - run: python alertas.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          MAIL_USUARIO: ${{ secrets.MAIL_USUARIO }}
+          MAIL_CLAVE: ${{ secrets.MAIL_CLAVE }}

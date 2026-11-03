@@ -1,257 +1,699 @@
-import streamlit as st
+"""
+Panel de control del secadero — Nostro Chacinados.
+
+Lee la telemetria que manda el ESP32 y la muestra para Esteban y Rafael.
+Nada de esto se puede ver sin estar logueado.
+"""
+
+import math
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 import plotly.express as px
-from supabase import create_client
-from datetime import datetime
+import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+from supabase import create_client
 
-# ==========================================
-# CONFIGURACIÓN GENERAL Y AUTO-REFRESH
-# ==========================================
+ZONA = timezone(timedelta(hours=-3))  # Argentina
+TOPE_SUPABASE = 1000  # lo que devuelve Supabase por pedido, aunque no avise
+
 st.set_page_config(page_title="Secadero IoT", layout="wide")
 
-# Recarga automática cada 60 segundos (60000 ms)
-st_autorefresh(interval=60000, key="recarga_automatica")
 
-SUPABASE_URL = "https://esdlelzxxcqavbwfqbti.supabase.co"
-SUPABASE_KEY = "TU_API_KEY_PUBLISHABLE_LARGUISIMA"  # Pegá tu clave pública acá
+# =====================================================================
+#  Conexion y login
+# =====================================================================
+def conexion():
+    """Un cliente por navegador.
 
-@st.cache_resource
-def iniciar_conexion():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    A proposito NO se usa st.cache_resource: eso comparte el mismo cliente
+    entre todos los que abren la app, y con el cliente viajaria la sesion
+    de quien se logueo primero.
+    """
+    if "sb" not in st.session_state:
+        st.session_state.sb = create_client(
+            st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"]
+        )
+    return st.session_state.sb
 
-supabase = iniciar_conexion()
 
-# ==========================================
-# EXTRACCIÓN DE DATOS DE SUPABASE
-# ==========================================
-def cargar_lotes():
-    res = supabase.table("lotes").select("*").order("fecha_inicio", desc=True).execute()
-    return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+def pantalla_login(sb):
+    st.title("🥩 Secadero Nostro")
+    st.caption("Panel de control del secadero. Hay que ingresar para verlo.")
 
-def cargar_telemetria():
-    res = supabase.table("secado").select("*").order("fecha_hora", desc=False).execute()
-    if res.data:
-        df = pd.DataFrame(res.data)
-        df['fecha_hora'] = pd.to_datetime(df['fecha_hora'])
-        return df
-    return pd.DataFrame()
-
-df_lotes = cargar_lotes()
-df_telemetria = cargar_telemetria()
-
-# ==========================================
-# BARRA LATERAL: CONTROLES, LOTES Y FASES
-# ==========================================
-with st.sidebar:
-    st.header("📦 Gestión de Lotes")
-    
-    with st.expander("➕ Iniciar Nuevo Lote"):
-        with st.form("form_nuevo_lote"):
-            nuevo_nombre = st.text_input("Nombre del Lote (Ej: Lote-Salame-01)")
-            nuevo_peso = st.number_input("Peso Inicial Total (Kg)", min_value=0.1, value=10.0, step=0.1)
-            if st.form_submit_button("Crear Lote"):
-                supabase.table("lotes").update({"estado": "Finalizado"}).neq("estado", "Finalizado").execute()
-                supabase.table("lotes").insert({"nombre": nuevo_nombre, "peso_inicial": nuevo_peso, "estado": "Activo"}).execute()
-                st.success("¡Lote creado exitosamente!")
-                st.cache_data.clear()
+    with st.form("login"):
+        mail = st.text_input("Mail")
+        clave = st.text_input("Contraseña", type="password")
+        if st.form_submit_button("Ingresar", type="primary"):
+            try:
+                sb.auth.sign_in_with_password({"email": mail, "password": clave})
+                st.session_state.usuario = mail
                 st.rerun()
+            except Exception:
+                st.error("Mail o contraseña incorrectos.")
 
-    # Identificación del lote activo
-    if not df_lotes.empty:
-        lotes_activos = df_lotes[df_lotes['estado'] == 'Activo']
-        if not lotes_activos.empty:
-            lote_actual = lotes_activos.iloc[0]
-            st.info(f"🟢 **Lote Activo:** {lote_actual['nombre']}\n\n**Peso Base:** {lote_actual['peso_inicial']} Kg")
+
+# =====================================================================
+#  Lectura de datos
+# =====================================================================
+def _paginar(armar_consulta, paso=TOPE_SUPABASE):
+    """Trae TODAS las filas, de a tandas.
+
+    Supabase corta en 1000 filas y no avisa: devuelve las primeras 1000 y
+    se queda callado. Pidiendo de a tandas hasta que venga una incompleta
+    no se pierde nada.
+    """
+    filas, desde = [], 0
+    while True:
+        datos = armar_consulta().range(desde, desde + paso - 1).execute().data or []
+        filas.extend(datos)
+        if len(datos) < paso:
+            return filas
+        desde += paso
+
+
+def lote_activo(sb):
+    datos = sb.table("lotes").select("*").eq("estado", "Activo").limit(1).execute().data
+    return datos[0] if datos else None
+
+
+def ultima_lectura(sb, lote_id):
+    datos = (
+        sb.table("lecturas")
+        .select("*")
+        .eq("lote_id", lote_id)
+        .order("medido_en", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return datos[0] if datos else None
+
+
+def lecturas(sb, lote_id, desde, por_hora):
+    """La ventana que se esta mirando, no la tabla entera.
+
+    Para ventanas largas se usa la vista por hora: un mes de lote son
+    43.000 filas y nadie mira 43.000 puntos en un grafico.
+    """
+    if por_hora:
+        filas = _paginar(
+            lambda: sb.table("lecturas_por_hora")
+            .select("*")
+            .eq("lote_id", lote_id)
+            .gte("hora", desde.isoformat())
+            .order("hora")
+        )
+        columna = "hora"
+    else:
+        filas = _paginar(
+            lambda: sb.table("lecturas")
+            .select("*")
+            .eq("lote_id", lote_id)
+            .gte("medido_en", desde.isoformat())
+            .order("medido_en")
+        )
+        columna = "medido_en"
+
+    if not filas:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(filas)
+    df["momento"] = pd.to_datetime(df[columna], utc=True).dt.tz_convert(ZONA)
+    return df
+
+
+def etapas(sb, lote_id):
+    return (
+        sb.table("etapas")
+        .select("*")
+        .eq("lote_id", lote_id)
+        .order("dia_desde")
+        .execute()
+        .data
+        or []
+    )
+
+
+def etapa_vigente(lista, fecha_inicio):
+    """La etapa que corresponde al dia que va corriendo el lote.
+
+    Despues de la ultima etapa se siguen usando sus rangos: un lote que se
+    estira no se queda sin control.
+    """
+    if not lista:
+        return None
+    dia = (ahora() - pd.to_datetime(fecha_inicio, utc=True).to_pydatetime()).days
+    for etapa in lista:
+        if etapa["dia_desde"] <= dia <= etapa["dia_hasta"]:
+            return etapa
+    return lista[-1] if dia > lista[-1]["dia_hasta"] else lista[0]
+
+
+# =====================================================================
+#  Cuentas
+# =====================================================================
+def ahora():
+    return datetime.now(timezone.utc)
+
+
+def punto_de_rocio(temp, humedad):
+    """Formula de Magnus.
+
+    La cuenta de bolsillo (T - (100-HR)/5) erra hasta un grado justo en el
+    margen que decide si hay condensacion, que es lo unico que importa aca.
+    """
+    if temp is None or humedad is None or humedad <= 0:
+        return None
+    a, b = 17.625, 243.04
+    alfa = math.log(humedad / 100.0) + (a * float(temp)) / (b + float(temp))
+    return (b * alfa) / (a - alfa)
+
+
+def merma_de_la_tira(lote, lectura):
+    """La merma medida: la tira testigo contra su propio peso inicial.
+
+    Es la unica merma que se mide de verdad. Antes se comparaba el peso de
+    la tira contra los kilos del lote entero y daba cualquier cosa.
+    """
+    if not lectura:
+        return None
+    peso = lectura.get("peso_tira_g")
+    inicial = lote.get("tira_peso_inicial_g")
+    if peso is None or not inicial:
+        return None
+    return (float(inicial) - float(peso)) / float(inicial) * 100.0
+
+
+def producto_estimado(lote, merma):
+    """Cuanto producto quedaria en camara, estimado.
+
+    Es la merma de la tira aplicada a los kilos que se embutieron. Es una
+    cuenta, no una medicion: sirve para tener una idea, no para facturar.
+    """
+    if merma is None or not lote.get("kg_embutidos"):
+        return None
+    return float(lote["kg_embutidos"]) * (1 - merma / 100.0)
+
+
+def texto_antiguedad(momento):
+    minutos = int((ahora() - momento).total_seconds() // 60)
+    if minutos < 1:
+        return "recién"
+    if minutos < 60:
+        return f"hace {minutos} min"
+    if minutos < 60 * 48:
+        return f"hace {minutos // 60} h"
+    return f"hace {minutos // 1440} días"
+
+
+def valor(lectura, campo, unidad, decimales=1):
+    if not lectura or lectura.get(campo) is None:
+        return "— sin dato"
+    return f"{float(lectura[campo]):.{decimales}f} {unidad}"
+
+
+# =====================================================================
+#  Barra lateral
+# =====================================================================
+def barra_lateral(sb, lote, lista_etapas):
+    with st.sidebar:
+        st.caption(f"👤 {st.session_state.usuario}")
+        if st.button("Salir"):
+            sb.auth.sign_out()
+            st.session_state.clear()
+            st.rerun()
+
+        st.markdown("---")
+        st.header("📦 Lote")
+
+        if lote:
+            st.success(f"**{lote['nombre']}** — activo")
+            inicio = pd.to_datetime(lote["fecha_inicio"], utc=True).tz_convert(ZONA)
+            st.caption(
+                f"Desde el {inicio.strftime('%d/%m/%Y')} · "
+                f"día {(ahora() - inicio.to_pydatetime()).days}"
+            )
+            tira = lote.get("tira_peso_inicial_g")
+            st.caption(
+                f"Tira testigo: {tira:.0f} g" if tira else "⚠️ Falta el peso de la tira"
+            )
+            if lote.get("kg_embutidos"):
+                st.caption(f"Embutido: {float(lote['kg_embutidos']):.0f} kg")
+
+            if st.button("Finalizar lote"):
+                sb.table("lotes").update(
+                    {"estado": "Finalizado", "fecha_fin": ahora().isoformat()}
+                ).eq("id", lote["id"]).execute()
+                st.rerun()
         else:
-            st.warning("No hay lotes en estado Activo.")
-            lote_actual = None
-    else:
-        st.warning("No hay registros en la tabla de lotes.")
-        lote_actual = None
+            st.warning("No hay ningún lote activo.")
 
-    st.markdown("---")
-    st.header("📝 Carga Manual (pH)")
-    with st.form("form_bromatologia"):
-        fecha_ph = st.date_input("Fecha de medición", value=datetime.today())
-        hora_ph = st.time_input("Hora de medición", value=datetime.now().time())
-        ph_val = st.number_input("Valor de pH", min_value=3.0, max_value=8.0, value=5.4, step=0.05)
-        notas = st.text_input("Observaciones organolépticas")
-        
-        if st.form_submit_button("Guardar pH"):
-            if lote_actual is not None:
-                fecha_hora_combinada = datetime.combine(fecha_ph, hora_ph).isoformat()
-                nuevo_registro = {
-                    "lote": lote_actual['nombre'],
-                    "peso_inicial": lote_actual['peso_inicial'],
-                    "ph": ph_val,
-                    "notas": notas,
-                    "fecha_hora": fecha_hora_combinada
-                }
-                supabase.table("secado").insert(nuevo_registro).execute()
-                st.success("✅ Medición guardada")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error("Debe existir un lote activo para registrar datos.")
+        with st.expander("➕ Iniciar lote nuevo"):
+            with st.form("nuevo_lote"):
+                nombre = st.text_input("Nombre", placeholder="Salame 2026-11")
+                tira = st.number_input(
+                    "Peso inicial de la tira testigo (g)",
+                    min_value=0.0, value=800.0, step=10.0,
+                    help="La tira que cuelga de la celda. De acá sale la merma.",
+                )
+                kilos = st.number_input(
+                    "Kilos embutidos en total",
+                    min_value=0.0, value=100.0, step=1.0,
+                    help="Solo para estimar cuánto producto queda. No se vuelve a pesar.",
+                )
+                if st.form_submit_button("Crear", type="primary"):
+                    crear_lote(sb, nombre, tira, kilos)
 
-    st.markdown("---")
-    st.header("⚙️ Configuración de Fase")
-    fase_actual = st.selectbox("Etapa Activa", ["1. Estufa / Fermentación", "2. Secado / Maduración", "3. Estabilización"])
-    
-    # Rangos dinámicos precargados según etapa
-    t_min_def = 20.0 if "Estufa" in fase_actual else 12.0
-    t_max_def = 24.0 if "Estufa" in fase_actual else 16.0
-    h_min_def = 85.0 if "Estufa" in fase_actual else 72.0
-    h_max_def = 95.0 if "Estufa" in fase_actual else 82.0
+        if lote:
+            st.markdown("---")
+            st.header("🎚️ Rangos por etapa")
+            st.caption(
+                "Los rangos y los minutos de tolerancia se guardan en la base: "
+                "los ven igual los dos y de acá salen los mails."
+            )
+            editor_etapas(sb, lote, lista_etapas)
 
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        t_min = st.number_input("Temp Min (°C)", value=t_min_def, step=0.5)
-        h_min = st.number_input("Hum Min (%)", value=h_min_def, step=1.0)
-    with col_t2:
-        t_max = st.number_input("Temp Max (°C)", value=t_max_def, step=0.5)
-        h_max = st.number_input("Hum Max (%)", value=h_max_def, step=1.0)
-
-# ==========================================
-# PANEL CENTRAL
-# ==========================================
-st.title("🥩 Panel de Control Industrial - Secadero")
-
-if df_telemetria.empty or lote_actual is None:
-    st.warning("⏳ Esperando telemetría del ESP32 o creación de un lote activo...")
-else:
-    # Filtro estricto por fecha de inicio del lote activo
-    df_lote_activo = df_telemetria[df_telemetria['fecha_hora'] >= lote_actual['fecha_inicio']]
-    
-    if not df_lote_activo.empty:
-        ultimo = df_lote_activo.iloc[-1]
-        peso_ref = lote_actual['peso_inicial']
-        merma_actual = ((peso_ref - ultimo['peso_actual']) / peso_ref) * 100 if peso_ref > 0 else 0.0
-
-        st.caption(f"Lote: **{lote_actual['nombre']}** | Fase: **{fase_actual}** | Rango T: {t_min}-{t_max}°C | Rango H: {h_min}-{h_max}%")
-
-        # 1. Indicadores Principales (KPIs)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("🌡️ Temp. Sala", f"{ultimo['temp_sala']:.1f} °C")
-        c2.metric("💧 Humedad", f"{ultimo['hum_sala']:.1f} %")
-        c3.metric("🎯 Temp. Núcleo", f"{ultimo['temp_int']:.1f} °C")
-        c4.metric("🔦 Superficie (IR)", f"{ultimo['temp_sup']:.1f} °C")
-        c5.metric("⚖️ Peso Actual", f"{ultimo['peso_actual']:.2f} Kg", f"-{merma_actual:.1f}% Merma", delta_color="inverse")
+            st.markdown("---")
+            st.header("📝 Carga manual")
+            with st.form("medicion"):
+                fecha = st.date_input("Fecha", value=datetime.now(ZONA).date())
+                hora = st.time_input("Hora", value=datetime.now(ZONA).time())
+                ph = st.number_input("pH", min_value=3.0, max_value=9.0,
+                                     value=5.4, step=0.05)
+                aw = st.number_input("aw (opcional)", min_value=0.0, max_value=1.0,
+                                     value=0.0, step=0.005, format="%.3f")
+                notas = st.text_input("Observaciones")
+                if st.form_submit_button("Guardar"):
+                    sb.table("mediciones").insert({
+                        "lote_id": lote["id"],
+                        "medido_en": datetime.combine(fecha, hora)
+                        .replace(tzinfo=ZONA).isoformat(),
+                        "ph": ph,
+                        "aw": aw if aw > 0 else None,
+                        "notas": notas or None,
+                    }).execute()
+                    st.success("Guardado")
+                    st.rerun()
 
         st.markdown("---")
+        with st.expander("✉️ Avisos por mail"):
+            editor_config(sb)
 
-        # 2. Semáforos Prescriptivos Bromatológicos
-        st.subheader("🚦 Diagnóstico Prescriptivo y Alertas")
-        s1, s2 = st.columns(2)
 
-        with s1:
-            st.markdown("#### 1. Control de Temperatura")
-            if ultimo['temp_sala'] > t_max:
-                st.error(f"**Riesgo:** Fusión de grasa superficial y acidez descontrolada (Supera {t_max}°C).\n\n**Acción:** Bajar consigna del termostato.")
-            elif ultimo['temp_sala'] < t_min:
-                st.warning(f"**Riesgo:** Freno en la maduración o inhibición del fermento (Inferior a {t_min}°C).\n\n**Acción:** Incrementar calefacción a consigna óptima.")
-            else:
-                st.success(f"✅ Temperatura estabilizada dentro de rango ({t_min}°C - {t_max}°C).")
+def crear_lote(sb, nombre, tira, kilos):
+    if not nombre.strip():
+        st.error("Poné un nombre.")
+        return
 
-        with s2:
-            st.markdown("#### 2. Control de Humedad")
-            if ultimo['hum_sala'] < h_min:
-                st.error(f"**Riesgo:** Encostramiento severo en tripa (anillo de secado). Bloquea la salida de humedad.\n\n**Acción:** Apagar forzadores y elevar humedad por encima de {h_min}%.")
-            elif ultimo['hum_sala'] > h_max:
-                st.warning(f"**Riesgo:** Estancamiento de merma y desarrollo de flora fúngica no deseada (Supera {h_max}%).\n\n**Acción:** Activar renovación de aire o deshumidificación.")
-            else:
-                st.success(f"✅ Humedad relativa en equilibrio ({h_min}% - {h_max}%).")
+    # Cerrar el anterior primero: la base no deja dos lotes activos.
+    sb.table("lotes").update(
+        {"estado": "Finalizado", "fecha_fin": ahora().isoformat()}
+    ).eq("estado", "Activo").execute()
 
-        s3, s4 = st.columns(2)
+    nuevo = sb.table("lotes").insert({
+        "nombre": nombre.strip(),
+        "tira_peso_inicial_g": tira or None,
+        "kg_embutidos": kilos or None,
+    }).execute().data[0]
 
-        with s3:
-            st.markdown("#### 3. Cinética de Merma")
-            if merma_actual >= 35.0:
-                st.error(f"**Riesgo:** Sobre-secado crítico ({merma_actual:.1f}%). Endurecimiento excesivo de textura.\n\n**Acción:** Concluir proceso o pasar a cámara de estabilización.")
-            elif merma_actual < 5.0 and "Secado" in fase_actual:
-                st.info(f"**Etapa Temprana:** Merma en {merma_actual:.1f}%. Controlar acidez y caída de pH antes de acelerar desecación.")
-            else:
-                st.success(f"✅ Ritmo de pérdida de peso dentro de parámetros ({merma_actual:.1f}%).")
+    # Etapas por defecto. Se editan despues desde la barra lateral.
+    sb.table("etapas").insert([
+        {"lote_id": nuevo["id"], "nombre": "Estufa / Fermentación",
+         "dia_desde": 0, "dia_hasta": 2,
+         "temp_min": 20, "temp_max": 24, "hum_min": 85, "hum_max": 95,
+         "tolerancia_min": 30},
+        {"lote_id": nuevo["id"], "nombre": "Secado / Maduración",
+         "dia_desde": 3, "dia_hasta": 21,
+         "temp_min": 12, "temp_max": 16, "hum_min": 72, "hum_max": 82,
+         "tolerancia_min": 60},
+        {"lote_id": nuevo["id"], "nombre": "Estabilización",
+         "dia_desde": 22, "dia_hasta": 180,
+         "temp_min": 10, "temp_max": 14, "hum_min": 70, "hum_max": 78,
+         "tolerancia_min": 120},
+    ]).execute()
 
-        with s4:
-            st.markdown("#### 4. Psicrometría y Condensación")
-            punto_rocio = ultimo['temp_sala'] - ((100 - ultimo['hum_sala']) / 5)
-            if ultimo['temp_sup'] <= punto_rocio:
-                st.error(f"**Riesgo Crítico:** Condensación / Transpiración de tripa (Superficie: {ultimo['temp_sup']:.1f}°C <= Rocío: {punto_rocio:.1f}°C).\n\n**Acción Urgente:** Bajar humedad un 10% y activar ventilación para secar película superficial.")
-            else:
-                st.success(f"✅ Sin riesgo de condensación (Superficie: {ultimo['temp_sup']:.1f}°C > Rocío: {punto_rocio:.1f}°C).")
+    st.success(f"Lote {nombre} creado.")
+    st.rerun()
 
-        st.markdown("---")
 
-        # 3. Gráficos Individuales e Históricos
-        st.subheader("📈 Monitoreo Detallado")
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "Temperaturas", "Humedad", "Merma de Peso", "Evolución de pH", "🗄️ Historial de Lotes", "📸 Inspección Visual"
-        ])
+def editor_etapas(sb, lote, lista_etapas):
+    if not lista_etapas:
+        st.info("Este lote no tiene etapas cargadas.")
+        return
 
-        # Renombrado de variables para visualización limpia
-        df_graficos = df_lote_activo.dropna(subset=['temp_sala']).copy()
-        df_graficos = df_graficos.rename(columns={
-            'fecha_hora': 'Fecha y hora',
-            'temp_sala': 'Temp sala',
-            'temp_int': 'Temp núcleo',
-            'temp_sup': 'Temp superficie',
-            'hum_sala': 'Humedad',
-            'peso_actual': 'Peso actual'
-        })
+    columnas = ["nombre", "dia_desde", "dia_hasta", "temp_min", "temp_max",
+                "hum_min", "hum_max", "tolerancia_min"]
+    tabla = pd.DataFrame(lista_etapas)[["id"] + columnas]
 
-        with tab1:
-            st.plotly_chart(px.line(df_graficos, x='Fecha y hora', y=['Temp sala', 'Temp núcleo', 'Temp superficie'],
-                                    labels={'value': 'Temperatura (°C)', 'variable': 'Sensor'},
-                                    title="Evolución Térmica Tri-Punto"), use_container_width=True)
+    editada = st.data_editor(
+        tabla, hide_index=True, use_container_width=True,
+        disabled=["id"], column_config={
+            "id": None,
+            "nombre": st.column_config.TextColumn("Etapa"),
+            "dia_desde": st.column_config.NumberColumn("Día desde", width="small"),
+            "dia_hasta": st.column_config.NumberColumn("Día hasta", width="small"),
+            "temp_min": st.column_config.NumberColumn("T mín", format="%.1f"),
+            "temp_max": st.column_config.NumberColumn("T máx", format="%.1f"),
+            "hum_min": st.column_config.NumberColumn("H mín", format="%.1f"),
+            "hum_max": st.column_config.NumberColumn("H máx", format="%.1f"),
+            "tolerancia_min": st.column_config.NumberColumn(
+                "Avisar tras (min)",
+                help="Minutos seguidos fuera de rango antes de mandar el mail.",
+            ),
+        },
+    )
 
-        with tab2:
-            st.plotly_chart(px.line(df_graficos, x='Fecha y hora', y='Humedad',
-                                    color_discrete_sequence=['#00a8ff'],
-                                    labels={'Humedad': 'Humedad (%)'},
-                                    title="Humedad Relativa de Cámara"), use_container_width=True)
+    if st.button("Guardar rangos"):
+        for _, fila in editada.iterrows():
+            sb.table("etapas").update(
+                {c: (None if pd.isna(fila[c]) else fila[c]) for c in columnas}
+            ).eq("id", int(fila["id"])).execute()
+        st.success("Rangos guardados")
+        st.rerun()
 
-        with tab3:
-            st.plotly_chart(px.line(df_graficos, x='Fecha y hora', y='Peso actual',
-                                    color_discrete_sequence=['#e84118'],
-                                    labels={'Peso actual': 'Peso (Kg)'},
-                                    title="Curva de Pérdida de Masa"), use_container_width=True)
 
-        with tab4:
-            df_ph = df_lote_activo.dropna(subset=['ph']).copy()
-            if not df_ph.empty:
-                df_ph = df_ph.sort_values(by='fecha_hora')
-                df_ph = df_ph.rename(columns={'fecha_hora': 'Fecha y hora', 'ph': 'pH'})
-                st.plotly_chart(px.line(df_ph, x='Fecha y hora', y='pH', markers=True,
-                                        color_discrete_sequence=['#9c88ff'],
-                                        title="Curva de Acidificación Bromatológica"), use_container_width=True)
-            else:
-                st.info("No se han registrado mediciones manuales de pH para este lote.")
+def editor_config(sb):
+    actual = sb.table("config").select("*").limit(1).execute().data[0]
 
-        with tab5:
-            st.subheader("Registro Histórico de Lotes")
-            df_lotes_mostrar = df_lotes.copy()
-            if 'id' in df_lotes_mostrar.columns:
-                df_lotes_mostrar = df_lotes_mostrar.drop(columns=['id'])
-            df_lotes_mostrar['fecha_inicio'] = pd.to_datetime(df_lotes_mostrar['fecha_inicio']).dt.strftime('%Y-%m-%d %H:%M')
-            df_lotes_mostrar = df_lotes_mostrar.rename(columns={
-                'nombre': 'Nombre',
-                'peso_inicial': 'Peso inicial (Kg)',
-                'fecha_inicio': 'Fecha inicio',
-                'estado': 'Estado'
-            })
-            st.dataframe(df_lotes_mostrar, use_container_width=True, hide_index=True)
+    with st.form("config"):
+        destinos = st.text_input(
+            "Mails, separados por coma",
+            value=", ".join(actual.get("destinatarios") or []),
+        )
+        mudo = st.number_input(
+            "Avisar si no llega nada hace (min)",
+            min_value=5, max_value=1440, value=actual["minutos_sin_lecturas"], step=5,
+        )
+        rocio = st.number_input(
+            "Tolerancia de condensación (min)",
+            min_value=0, max_value=240, value=actual["tolerancia_rocio_min"], step=5,
+        )
+        reenvio = st.number_input(
+            "Repetir el aviso cada (min)",
+            min_value=15, max_value=1440, value=actual["reenvio_min"], step=15,
+        )
+        if st.form_submit_button("Guardar"):
+            sb.table("config").update({
+                "destinatarios": [m.strip() for m in destinos.split(",") if m.strip()],
+                "minutos_sin_lecturas": mudo,
+                "tolerancia_rocio_min": rocio,
+                "reenvio_min": reenvio,
+            }).eq("id", True).execute()
+            st.success("Guardado")
 
-        with tab6:
-            st.subheader(f"Galería Fotográfica: {lote_actual['nombre']}")
-            res_fotos = supabase.table("galeria").select("*").eq("lote", lote_actual['nombre']).order("fecha_hora", desc=True).execute()
-            if res_fotos.data:
-                cols = st.columns(3)
-                for idx, foto in enumerate(res_fotos.data):
-                    with cols[idx % 3]:
-                        st.image(foto['ruta_foto'], caption=f"Captura: {foto['fecha_hora'][:16].replace('T', ' ')}")
-            else:
-                st.info("No hay fotografías enviadas por Telegram para el lote activo.")
+
+# =====================================================================
+#  Panel
+# =====================================================================
+def encabezado(lote, etapa, lectura, config):
+    st.title("🥩 Panel de control — Secadero")
+
+    if not lectura:
+        st.warning("Todavía no llegó ninguna lectura del ESP32 para este lote.")
+        return False
+
+    medido = pd.to_datetime(lectura["medido_en"], utc=True).to_pydatetime()
+    minutos = (ahora() - medido).total_seconds() / 60
+    sello = (
+        f"Última lectura: **{texto_antiguedad(medido)}** "
+        f"({medido.astimezone(ZONA).strftime('%d/%m/%Y %H:%M')})"
+    )
+
+    # Lo mas importante de la pantalla: si el dato es viejo, los numeros de
+    # abajo son una foto vieja y hay que decirlo fuerte.
+    if minutos > config["minutos_sin_lecturas"]:
+        st.error(
+            f"⚠️ {sello}. El equipo no está mandando datos: "
+            "lo que se ve abajo es viejo."
+        )
+    elif minutos > 15:
+        st.warning(f"{sello}")
     else:
-        st.info("Lote activo configurado. Aguardando los primeros paquetes de datos del microcontrolador...")
+        st.caption(f"🟢 {sello}")
+
+    nombre_etapa = etapa["nombre"] if etapa else "sin etapa"
+    rangos = (
+        f"T {etapa['temp_min']}-{etapa['temp_max']}°C · "
+        f"H {etapa['hum_min']}-{etapa['hum_max']}%"
+        if etapa else ""
+    )
+    st.caption(f"Lote **{lote['nombre']}** · Etapa **{nombre_etapa}** · {rangos}")
+    return True
+
+
+def indicadores(lote, lectura):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🌡️ Temp. sala", valor(lectura, "temp_sala", "°C"))
+    c2.metric("💧 Humedad", valor(lectura, "hum_sala", "%"))
+    c3.metric("🎯 Temp. núcleo", valor(lectura, "temp_nucleo", "°C"))
+    c4.metric("🔦 Superficie", valor(lectura, "temp_sup", "°C"))
+
+    merma = merma_de_la_tira(lote, lectura)
+    estimado = producto_estimado(lote, merma)
+
+    c5, c6, c7 = st.columns(3)
+    c5.metric("⚖️ Tira testigo", valor(lectura, "peso_tira_g", "g", 0))
+    c6.metric(
+        "📉 Merma medida",
+        "— sin dato" if merma is None else f"{merma:.1f} %",
+        help="La tira testigo contra su propio peso inicial. Es lo único que se mide.",
+    )
+    c7.metric(
+        "📦 Producto estimado",
+        "— sin dato" if estimado is None else f"{estimado:.0f} kg",
+        help=(
+            "Estimación: la merma de la tira aplicada a los kilos embutidos. "
+            "Es una cuenta aproximada, no una pesada."
+        ),
+    )
+    return merma
+
+
+def diagnostico(lectura, etapa, merma, config):
+    st.subheader("🚦 Diagnóstico")
+    if not etapa:
+        st.info("Cargá las etapas del lote para tener diagnóstico.")
+        return
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("#### Temperatura")
+        temp = lectura.get("temp_sala")
+        if temp is None:
+            st.info("Sin dato del sensor de sala.")
+        elif etapa["temp_max"] is not None and float(temp) > float(etapa["temp_max"]):
+            st.error(
+                f"**Riesgo:** fusión de grasa superficial y acidez descontrolada "
+                f"(supera {etapa['temp_max']}°C).\n\n**Acción:** bajar el termostato."
+            )
+        elif etapa["temp_min"] is not None and float(temp) < float(etapa["temp_min"]):
+            st.warning(
+                f"**Riesgo:** se frena la maduración (por debajo de "
+                f"{etapa['temp_min']}°C).\n\n**Acción:** subir la calefacción."
+            )
+        else:
+            st.success("✅ Temperatura en rango.")
+
+    with c2:
+        st.markdown("#### Humedad")
+        hum = lectura.get("hum_sala")
+        if hum is None:
+            st.info("Sin dato del sensor de humedad.")
+        elif etapa["hum_min"] is not None and float(hum) < float(etapa["hum_min"]):
+            st.error(
+                f"**Riesgo:** encostramiento de la tripa, el anillo de secado "
+                f"bloquea la salida de humedad (por debajo de {etapa['hum_min']}%)."
+                f"\n\n**Acción:** apagar forzadores y subir la humedad."
+            )
+        elif etapa["hum_max"] is not None and float(hum) > float(etapa["hum_max"]):
+            st.warning(
+                f"**Riesgo:** se frena la merma y aparece flora no deseada "
+                f"(supera {etapa['hum_max']}%).\n\n**Acción:** renovar aire."
+            )
+        else:
+            st.success("✅ Humedad en rango.")
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+        st.markdown("#### Merma")
+        if merma is None:
+            st.info(
+                "Sin merma: falta el peso de la tira testigo o la celda "
+                "todavía no manda dato."
+            )
+        else:
+            st.success(f"La tira perdió **{merma:.1f} %** de su peso inicial.")
+
+    with c4:
+        st.markdown("#### Condensación")
+        rocio = punto_de_rocio(lectura.get("temp_sala"), lectura.get("hum_sala"))
+        sup = lectura.get("temp_sup")
+        if rocio is None or sup is None:
+            st.info("Sin datos para calcular el punto de rocío.")
+        elif float(sup) <= rocio:
+            st.error(
+                f"**Riesgo:** la tripa transpira (superficie {float(sup):.1f}°C ≤ "
+                f"rocío {rocio:.1f}°C).\n\n**Acción:** bajar humedad y ventilar."
+            )
+        else:
+            st.success(
+                f"✅ Sin riesgo (superficie {float(sup):.1f}°C > rocío {rocio:.1f}°C)."
+            )
+
+
+def graficos(sb, lote):
+    st.subheader("📈 Evolución")
+
+    ventana = st.radio(
+        "Ventana",
+        ["Últimas 24 h", "Últimos 7 días", "Todo el lote"],
+        horizontal=True, label_visibility="collapsed",
+    )
+    if ventana == "Últimas 24 h":
+        desde, por_hora = ahora() - timedelta(hours=24), False
+    elif ventana == "Últimos 7 días":
+        desde, por_hora = ahora() - timedelta(days=7), True
+    else:
+        desde = pd.to_datetime(lote["fecha_inicio"], utc=True).to_pydatetime()
+        por_hora = True
+
+    df = lecturas(sb, lote["id"], desde, por_hora)
+    if df.empty:
+        st.info("No hay lecturas en esta ventana.")
+        return
+
+    if por_hora:
+        st.caption(f"{len(df)} puntos, promediados por hora.")
+
+    nombres = {
+        "temp_sala": "Temp sala",
+        "temp_nucleo": "Temp núcleo",
+        "temp_sup": "Temp superficie",
+        "hum_sala": "Humedad",
+        "peso_tira_g": "Peso tira (g)",
+    }
+    df = df.rename(columns=nombres)
+
+    t1, t2, t3, t4 = st.tabs(["Temperaturas", "Humedad", "Merma", "pH"])
+
+    with t1:
+        columnas = [c for c in ["Temp sala", "Temp núcleo", "Temp superficie"]
+                    if c in df and df[c].notna().any()]
+        if columnas:
+            st.plotly_chart(
+                px.line(df, x="momento", y=columnas,
+                        labels={"value": "°C", "variable": "Sensor", "momento": ""}),
+                use_container_width=True,
+            )
+        else:
+            st.info("Sin datos de temperatura en esta ventana.")
+
+    with t2:
+        if "Humedad" in df and df["Humedad"].notna().any():
+            st.plotly_chart(
+                px.line(df, x="momento", y="Humedad",
+                        labels={"Humedad": "%", "momento": ""}),
+                use_container_width=True,
+            )
+        else:
+            st.info("Sin datos de humedad en esta ventana.")
+
+    with t3:
+        inicial = lote.get("tira_peso_inicial_g")
+        if "Peso tira (g)" in df and df["Peso tira (g)"].notna().any() and inicial:
+            df["Merma (%)"] = (
+                (float(inicial) - df["Peso tira (g)"]) / float(inicial) * 100
+            )
+            st.plotly_chart(
+                px.line(df, x="momento", y="Merma (%)",
+                        labels={"momento": ""}),
+                use_container_width=True,
+            )
+        else:
+            st.info(
+                "Sin merma todavía: falta el peso inicial de la tira o la celda "
+                "no está mandando."
+            )
+
+    with t4:
+        filas = (
+            sb.table("mediciones").select("*").eq("lote_id", lote["id"])
+            .not_.is_("ph", "null").order("medido_en").execute().data or []
+        )
+        if filas:
+            dfp = pd.DataFrame(filas)
+            dfp["momento"] = pd.to_datetime(dfp["medido_en"], utc=True).dt.tz_convert(ZONA)
+            st.plotly_chart(
+                px.line(dfp, x="momento", y="ph", markers=True,
+                        labels={"ph": "pH", "momento": ""}),
+                use_container_width=True,
+            )
+        else:
+            st.info("No hay mediciones de pH cargadas para este lote.")
+
+
+def historial(sb):
+    with st.expander("🗄️ Lotes anteriores"):
+        filas = (
+            sb.table("lotes").select("*").order("fecha_inicio", desc=True)
+            .limit(100).execute().data or []
+        )
+        if not filas:
+            st.info("Todavía no hay lotes.")
+            return
+        df = pd.DataFrame(filas)
+        df["fecha_inicio"] = pd.to_datetime(df["fecha_inicio"], utc=True) \
+            .dt.tz_convert(ZONA).dt.strftime("%d/%m/%Y %H:%M")
+        st.dataframe(
+            df[["nombre", "fecha_inicio", "estado",
+                "tira_peso_inicial_g", "kg_embutidos"]]
+            .rename(columns={
+                "nombre": "Lote", "fecha_inicio": "Inicio", "estado": "Estado",
+                "tira_peso_inicial_g": "Tira (g)", "kg_embutidos": "Embutido (kg)",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+
+# =====================================================================
+#  Arranque
+# =====================================================================
+def main():
+    sb = conexion()
+
+    if "usuario" not in st.session_state:
+        pantalla_login(sb)
+        return
+
+    st_autorefresh(interval=60000, key="recarga")
+
+    lote = lote_activo(sb)
+    lista_etapas = etapas(sb, lote["id"]) if lote else []
+    barra_lateral(sb, lote, lista_etapas)
+
+    if not lote:
+        st.title("🥩 Panel de control — Secadero")
+        st.info("No hay ningún lote activo. Creá uno desde la barra de la izquierda.")
+        historial(sb)
+        return
+
+    config = sb.table("config").select("*").limit(1).execute().data[0]
+    lectura = ultima_lectura(sb, lote["id"])
+    etapa = etapa_vigente(lista_etapas, lote["fecha_inicio"])
+
+    if encabezado(lote, etapa, lectura, config):
+        st.markdown("---")
+        merma = indicadores(lote, lectura)
+        st.markdown("---")
+        diagnostico(lectura, etapa, merma, config)
+        st.markdown("---")
+        graficos(sb, lote)
+
+    historial(sb)
+
+
+if __name__ == "__main__":
+    main()
