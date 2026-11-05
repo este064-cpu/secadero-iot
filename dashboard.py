@@ -207,16 +207,37 @@ def peso_inicial_de_la_tira(sb, lote, lectura):
     que elegir entre anotar un peso que todavia se esta acomodando o cerrar
     el lote y volver a abrirlo.
     """
-    with st.expander("Peso de la tira testigo"):
+    actual = lote.get("tira_peso_inicial_g")
+    referencia = lote.get("tira_peso_referencia_g")
+
+    # Lo primero que hay que ver: si ya se tomó y de dónde salió.
+    if actual:
+        cuando = lote.get("tira_peso_tomado_en")
+        como = ("lo tomó el sistema"
+                if lote.get("tira_peso_origen") == "automatico"
+                else "cargado a mano")
+        sello = ""
+        if cuando:
+            sello = (" el " + pd.to_datetime(cuando, utc=True)
+                     .tz_convert(ZONA).strftime("%d/%m a las %H:%M"))
+        st.caption(f"Peso inicial: **{float(actual):g} g** · {como}{sello}")
+    else:
         st.caption(
-            "Se carga **después** de colgar la tira y de dejar la celda unas "
-            "horas quieta. La celda se acomoda sola los primeros minutos, y "
-            "un peso tomado recién colgada le mete ese error a toda la merma "
-            "del lote."
+            "⏳ El peso inicial todavía no se tomó. El sistema lo toma solo "
+            "a las 2 horas de arrancado el lote."
         )
 
+    with st.expander("Peso de la tira testigo"):
+        st.caption(
+            "**Normalmente no hay que tocar nada acá.** El sistema lee la "
+            "celda solo, unas horas después de arrancar el lote, y lo compara "
+            "con el peso de la otra balanza. Esto es para corregirlo si algo "
+            "salió mal."
+        )
+        if referencia:
+            st.caption(f"En la otra balanza pesó **{float(referencia):g} g**.")
+
         marca = lectura.get("peso_tira_g") if lectura else None
-        actual = lote.get("tira_peso_inicial_g")
 
         if marca is not None:
             st.caption(f"La balanza marca ahora **{float(marca):.0f} g**.")
@@ -236,9 +257,11 @@ def peso_inicial_de_la_tira(sb, lote, lectura):
 def guardar_peso_tira(sb, lote, gramos):
     # La base exige > 0; un cero se guarda como null, que es "todavia no se
     # sabe" y no un peso de cero gramos.
-    sb.table("lotes").update(
-        {"tira_peso_inicial_g": gramos if gramos > 0 else None}
-    ).eq("id", lote["id"]).execute()
+    sb.table("lotes").update({
+        "tira_peso_inicial_g": gramos if gramos > 0 else None,
+        "tira_peso_tomado_en": ahora().isoformat() if gramos > 0 else None,
+        "tira_peso_origen": "manual" if gramos > 0 else None,
+    }).eq("id", lote["id"]).execute()
     st.success(f"Peso inicial: {gramos:g} g" if gramos > 0 else "Peso borrado.")
     st.rerun()
 
@@ -261,13 +284,6 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
                 f"Desde el {inicio.strftime('%d/%m/%Y')} · "
                 f"día {(ahora() - inicio.to_pydatetime()).days}"
             )
-            tira = lote.get("tira_peso_inicial_g")
-            # ":g" y no ":.0f": una tira de 0,5 g cargada por error se veria
-            # como "0 g" y parece un dato faltante en vez de un dato absurdo.
-            st.caption(
-                f"Tira testigo: {float(tira):g} g" if tira
-                else "Falta el peso de la tira"
-            )
             if lote.get("kg_embutidos"):
                 st.caption(f"Embutido: {float(lote['kg_embutidos']):.0f} kg")
 
@@ -284,17 +300,17 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
         with st.expander("Iniciar lote nuevo"):
             with st.form("nuevo_lote"):
                 nombre = st.text_input("Nombre", placeholder="Salame 2026-11")
-                # Arranca en 0 a proposito: lo correcto es colgar la tira,
-                # dejar la celda acomodarse unas horas y recien ahi cargar el
-                # peso desde "Peso de la tira testigo". Un valor por defecto
-                # invita a dejarlo como viene y arruina la merma del lote.
+                # El peso inicial ya no se pide: lo toma solo alertas.py
+                # unas horas despues. Lo que si conviene cargar es el de
+                # la otra balanza, que es el control.
                 tira = st.number_input(
-                    "Peso inicial de la tira testigo (g)",
+                    "Peso de la tira en la otra balanza (g)",
                     min_value=0.0, value=0.0, step=10.0,
                     help=(
-                        "Se puede dejar en 0 y cargarlo después, cuando la "
-                        "tira esté colgada y la celda quieta. De acá sale la "
-                        "merma: un peso apurado la arruina para todo el lote."
+                        "Pesala aparte antes de colgarla. El sistema toma el "
+                        "suyo solo a las 2 horas y lo compara con este: si no "
+                        "coinciden, manda un mail. Una balanza sola no se "
+                        "puede controlar a sí misma."
                     ),
                 )
                 kilos = st.number_input(
@@ -319,7 +335,9 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
             st.header("Rangos por etapa")
             st.caption(
                 "Los rangos y los minutos de tolerancia se guardan en la base: "
-                "los ven igual los dos y de acá salen los mails."
+                "los ven igual los dos y de acá salen los mails. Se pueden "
+                "agregar y borrar filas; el orden de la tabla es el orden de "
+                "las etapas."
             )
             editor_etapas(sb, lote, lista_etapas)
 
@@ -401,7 +419,7 @@ def crear_lote(sb, nombre, tira, kilos, dias_de_secado):
 
     nuevo = sb.table("lotes").insert({
         "nombre": nombre.strip(),
-        "tira_peso_inicial_g": tira or None,
+        "tira_peso_referencia_g": tira or None,
         "kg_embutidos": kilos or None,
     }).execute().data[0]
 
@@ -478,6 +496,7 @@ def editor_etapas(sb, lote, lista_etapas):
 
     editada = st.data_editor(
         tabla, hide_index=True, use_container_width=True,
+        num_rows="dynamic",
         disabled=["id", "arranca", "duró"], column_config={
             "id": None,
             "arranca": st.column_config.TextColumn("Arranca", width="small"),
@@ -500,12 +519,68 @@ def editor_etapas(sb, lote, lista_etapas):
     )
 
     if st.button("Guardar la receta"):
-        for _, fila in editada.iterrows():
-            sb.table("etapas").update(
-                {c: (None if pd.isna(fila[c]) else fila[c]) for c in columnas}
-            ).eq("id", int(fila["id"])).execute()
-        st.success("Receta guardada")
-        st.rerun()
+        guardar_receta(sb, lote, lista_etapas, editada, columnas)
+
+    with st.popover("Agregar días al final", use_container_width=True):
+        st.caption(
+            "Para cuando el lote se estira. Copia los rangos de la última "
+            "etapa, que es la consigna de guarda."
+        )
+        cuantos = st.number_input("Cuántos días", 1, 60, 3, key="cuantos_dias")
+        if st.button("Agregar", type="primary", key="agregar_dias"):
+            agregar_dias(sb, lote, lista_etapas, int(cuantos))
+
+
+def guardar_receta(sb, lote, lista_etapas, editada, columnas):
+    """Guarda la tabla editada: cambia, agrega y borra etapas.
+
+    El "orden" se renumera por la posicion de la fila. Es lo unico que se
+    puede hacer con una tabla editable: no hay forma de arrastrar filas,
+    asi que el lugar en la lista ES el orden, y una fila nueva va al
+    final. Para meter una etapa en el medio se agrega al final y se
+    corren los nombres, que para una rampa de dias es lo mismo.
+    """
+    eran = {e["id"] for e in lista_etapas}
+    siguen = set()
+
+    for posicion, (_, fila) in enumerate(editada.iterrows(), start=1):
+        valores = {c: (None if pd.isna(fila[c]) else fila[c]) for c in columnas}
+        valores["orden"] = posicion
+
+        if pd.isna(fila.get("id")):
+            valores["lote_id"] = lote["id"]
+            valores.setdefault("nombre", f"Etapa {posicion}")
+            sb.table("etapas").insert(valores).execute()
+        else:
+            siguen.add(int(fila["id"]))
+            sb.table("etapas").update(valores).eq("id", int(fila["id"])).execute()
+
+    # Las que ya no estan en la tabla las borro el usuario.
+    for id_borrada in eran - siguen:
+        sb.table("etapas").delete().eq("id", id_borrada).execute()
+
+    st.success("Receta guardada")
+    st.rerun()
+
+
+def agregar_dias(sb, lote, lista_etapas, cuantos):
+    """Suma etapas de 24 h al final, copiando los rangos de la última."""
+    ultima = max(lista_etapas, key=orden_de)
+    desde = orden_de(ultima)
+    numero = len([e for e in lista_etapas if orden_de(e) > 1]) + 3
+
+    sb.table("etapas").insert([{
+        "lote_id": lote["id"],
+        "orden": desde + i + 1,
+        "nombre": f"Día {numero + i}",
+        "horas": 24,
+        "temp_min": ultima["temp_min"], "temp_max": ultima["temp_max"],
+        "hum_min": ultima["hum_min"], "hum_max": ultima["hum_max"],
+        "tolerancia_min": ultima["tolerancia_min"],
+    } for i in range(cuantos)]).execute()
+
+    st.success(f"{cuantos} días agregados.")
+    st.rerun()
 
 
 
@@ -530,12 +605,29 @@ def editor_config(sb):
             "Repetir el aviso cada (min)",
             min_value=15, max_value=1440, value=actual["reenvio_min"], step=15,
         )
+        horas_peso = st.number_input(
+            "Tomar el peso de la tira a las (h)",
+            min_value=0.5, max_value=48.0, step=0.5,
+            value=float(actual.get("horas_peso_automatico") or 2),
+            help=(
+                "Horas después de arrancar el lote. Hay que darle tiempo a "
+                "la celda a acomodarse, pero no tanto como para que la tira "
+                "ya haya perdido algo que importe."
+            ),
+        )
+        tolerancia_peso = st.number_input(
+            "Avisar si difiere de la otra balanza (%)",
+            min_value=0.5, max_value=50.0, step=0.5,
+            value=float(actual.get("tolerancia_peso_pct") or 5),
+        )
         if st.form_submit_button("Guardar"):
             sb.table("config").update({
                 "destinatarios": [m.strip() for m in destinos.split(",") if m.strip()],
                 "minutos_sin_lecturas": mudo,
                 "tolerancia_rocio_min": rocio,
                 "reenvio_min": reenvio,
+                "horas_peso_automatico": horas_peso,
+                "tolerancia_peso_pct": tolerancia_peso,
             }).eq("id", True).execute()
             st.success("Guardado")
 

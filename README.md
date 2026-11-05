@@ -28,6 +28,7 @@ que aplicar las migraciones que falten, en orden, que no borran nada.
 | Archivo | Qué hace |
 |---|---|
 | `sql/002-etapas-en-horas.sql` | Pasa las etapas de días fijos a duraciones. Convierte solo las que ya existan. |
+| `sql/003-peso-inicial-automatico.sql` | Agrega el peso de control de la otra balanza y los tiempos de la toma automática. |
 
 > La carpeta se llama `sql/` y no `supabase/` a propósito: una carpeta
 > llamada igual que la librería la tapa al importarla y el panel no
@@ -121,17 +122,41 @@ número. Por el monitor serie a 115200 acepta tres órdenes:
 Los dos números quedan guardados en el ESP32 y sobreviven a los cortes de
 luz, así que esto se hace una sola vez en la instalación.
 
-**Al empezar un lote, el peso inicial de la tira se lee del panel**, no de
-otra balanza. Así cualquier error sistemático se cancela: la merma sale de
-dos pesadas hechas con el mismo instrumento.
+**El peso inicial de la tira lo toma el sistema solo**, leyendo la celda
+dos horas después de arrancar el lote. Nadie lo carga a mano.
 
-**Y se lee unas horas después de colgarla, no en el momento.** La celda se
-acomoda sola los primeros minutos bajo una carga nueva (sube varios gramos
-y después baja). Un peso inicial tomado recién colgada arrastra ese error a
-la merma de todo el lote. El orden es: tarar con el gancho vacío, colgar la
-tira, esperar —de un rato largo a toda la noche—, y recién ahí cargar el
-peso desde **⚖️ Peso de la tira testigo** en la barra lateral. Se puede
-abrir el lote con el peso en 0 y completarlo después.
+Es el número del que sale **toda** la merma del lote, y si alguien se
+olvida de cargarlo —o ese día no hay nadie en la planta— el lote queda sin
+merma y no se arregla después: la tira ya empezó a secarse. Por eso no
+puede depender de que alguien se acuerde.
+
+Lo toma **`alertas.py`, no el panel**. El panel solo corre cuando alguien
+lo tiene abierto, que es justo lo que no se puede garantizar; `alertas.py`
+corre en GitHub Actions cada 5 minutos pase lo que pase.
+
+**Por qué dos horas y no al instante.** La celda se acomoda sola bajo una
+carga nueva: sube varios gramos los primeros minutos y después baja. Un
+peso tomado recién colgada le mete ese error a la merma de todo el lote.
+Dos horas alcanzan para que se asiente y son pocas para que la tira haya
+perdido algo que importe. Se cambia desde el panel, en **Avisos por mail**.
+
+**Y se controla contra otra balanza.** Antes de colgar la tira se la pesa
+aparte y ese número se carga al crear el lote. Cuando el sistema toma el
+suyo, compara: si difieren más del 5 %, sale un mail. Una balanza sola no
+se puede controlar a sí misma — si la celda quedó mal tarada, el número
+que da parece perfectamente razonable y la merma del lote entero sale
+corrida sin que nadie lo note.
+
+Si la celda no manda **ningún** peso en esas dos horas, también sale un
+mail. Un silencio ahí es un lote sin merma.
+
+El orden de trabajo queda así:
+
+1. Tarar con el gancho vacío (`t` por el monitor serie).
+2. Pesar la tira en otra balanza y anotar ese número.
+3. Crear el lote en el panel con ese peso en **Peso de la tira en la otra
+   balanza**.
+4. Colgar la tira. Listo, no hay nada más que hacer.
 
 #### Cada cuánto mide
 
@@ -222,6 +247,14 @@ El botón **«Terminar y pasar a…»** de la barra lateral guarda en
 null, la etapa dura lo previsto. No hay ningún proceso que avance las
 etapas de fondo: el plan se calcula cada vez a partir de las duraciones,
 así que el panel y los mails no pueden quedar desfasados entre sí.
+
+**Las etapas se agregan y se borran desde la misma tabla.** Tiene filas
+dinámicas, y al guardar el `orden` se renumera por la posición: el lugar
+en la lista **es** el orden. No hay forma de arrastrar filas en una tabla
+editable de Streamlit, así que una fila nueva va al final; para meter una
+etapa en el medio se agrega abajo y se corren los nombres, que para una
+rampa de días es lo mismo. El botón **«Agregar días al final»** hace el
+caso común de un tirón, copiando los rangos de la última etapa.
 
 **Un lote nuevo se crea con el estufado y una etapa por día.** Después del
 estufado la cámara baja de a escalones diarios, así que la receta por

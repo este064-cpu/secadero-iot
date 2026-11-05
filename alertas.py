@@ -129,6 +129,97 @@ def cerrar(lote, tipo, titulo, config):
 # =====================================================================
 #  Cuentas
 # =====================================================================
+def fijar_peso_inicial(lote, config):
+    """Toma el peso inicial de la tira leyendo la celda, unas horas
+    despues de arrancar el lote.
+
+    Vive aca y no en el panel porque el panel solo corre cuando alguien
+    lo tiene abierto, y el caso que hay que cubrir es justamente el
+    contrario: que ese dia no haya nadie en la fabrica. Es el numero del
+    que sale TODA la merma del lote; si no se toma, no se recupera
+    despues, porque la tira ya empezo a secarse.
+
+    Se espera un rato y no se lee al instante porque la celda se acomoda
+    sola bajo una carga nueva: sube varios gramos los primeros minutos y
+    despues baja. Un peso tomado recien colgada arrastra ese error a toda
+    la merma.
+    """
+    if lote.get("tira_peso_inicial_g") is not None:
+        return
+
+    inicio = datetime.fromisoformat(lote["fecha_inicio"])
+    horas = (datetime.now(timezone.utc) - inicio).total_seconds() / 3600
+    if horas < float(config["horas_peso_automatico"]):
+        print(f"Peso inicial: faltan horas ({horas:.1f} de "
+              f"{config['horas_peso_automatico']}).")
+        return
+
+    fila = (
+        sb.table("lecturas").select("peso_tira_g, medido_en")
+        .eq("lote_id", lote["id"]).not_.is_("peso_tira_g", "null")
+        .order("medido_en", desc=True).limit(1).execute().data
+    )
+
+    # Sin peso de la celda no hay nada que fijar, y esto es grave: el
+    # lote se va a quedar sin merma. Vale un mail.
+    if not fila:
+        abrir_o_repetir(
+            lote, "peso_inicial", "no se pudo tomar el peso de la tira",
+            f"Pasaron {horas:.0f} horas desde que arrancó el lote y la celda "
+            "no mandó ningún peso. Sin peso inicial, este lote se queda sin "
+            "merma y eso no se arregla después.\n\n"
+            "Puede ser que la balanza no esté calibrada, que no haya nada "
+            "colgando o que la celda esté marcando en negativo.",
+            config,
+        )
+        return
+
+    peso = float(fila[0]["peso_tira_g"])
+    sb.table("lotes").update({
+        "tira_peso_inicial_g": peso,
+        "tira_peso_tomado_en": datetime.now(timezone.utc).isoformat(),
+        "tira_peso_origen": "automatico",
+    }).eq("id", lote["id"]).execute()
+    lote["tira_peso_inicial_g"] = peso
+    print(f"Peso inicial tomado solo: {peso:.1f} g")
+
+    cerrar(lote, "peso_inicial", "Se pudo tomar el peso de la tira", config)
+    controlar_contra_la_otra_balanza(lote, config, peso)
+
+
+def controlar_contra_la_otra_balanza(lote, config, peso):
+    """Compara el peso que tomo la celda contra el de la otra balanza.
+
+    Una balanza sola no se puede controlar a si misma: si la celda quedo
+    mal tarada o se descalibro, el numero que da parece perfectamente
+    razonable y la merma de todo el lote sale mal sin que nadie lo note.
+    Por eso se pesa la tira aparte antes de colgarla.
+    """
+    referencia = lote.get("tira_peso_referencia_g")
+    if not referencia:
+        return
+
+    referencia = float(referencia)
+    diferencia = abs(peso - referencia) / referencia * 100
+    if diferencia <= float(config["tolerancia_peso_pct"]):
+        print(f"Peso controlado: {peso:.1f} g contra {referencia:.1f} g "
+              f"de la otra balanza ({diferencia:.1f} % de diferencia).")
+        return
+
+    abrir_o_repetir(
+        lote, "peso_inicial", "la balanza no coincide con la otra",
+        f"La celda tomó {peso:.1f} g como peso inicial de la tira, pero en la "
+        f"otra balanza había pesado {referencia:.1f} g: "
+        f"{diferencia:.1f} % de diferencia.\n\n"
+        "Alguna de las dos está mal. Mientras no se resuelva, la merma de "
+        "este lote va a salir corrida.\n\n"
+        "Lo más probable es que la celda haya quedado mal tarada. Se corrige "
+        "cargando el peso bueno a mano desde el panel, en «Peso de la tira "
+        "testigo».",
+        config,
+    )
+
+
 def minutos_seguidos_mal(lecturas, esta_mal):
     """Hace cuantos minutos que TODAS las lecturas vienen mal.
 
@@ -163,6 +254,13 @@ def revisar():
         sb.table("lecturas").select("*").eq("lote_id", lote["id"])
         .order("medido_en", desc=True).limit(1).execute().data
     )
+
+    # --- El peso inicial de la tira -----------------------------------
+    # Va antes que todo lo demas, y en particular antes del corte por
+    # silencio del equipo: si el ESP32 estuvo caido justo en la ventana,
+    # igual hay que avisar que el lote se esta quedando sin peso inicial.
+    # Es el unico numero que no se puede recuperar mas tarde.
+    fijar_peso_inicial(lote, config)
 
     # --- El equipo dejo de mandar -------------------------------------
     if not ultima:

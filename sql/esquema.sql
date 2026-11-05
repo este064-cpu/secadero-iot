@@ -43,7 +43,21 @@ create table lotes (
 
   -- La tira testigo que cuelga de la celda. En gramos, porque la celda
   -- mide gramos y pasarlo a kilos solo esconde decimales.
-  tira_peso_inicial_g numeric(8, 1) check (tira_peso_inicial_g > 0),
+  --
+  -- No se carga a mano: unas horas despues de arrancar el lote lo toma
+  -- solo alertas.py leyendo la celda. Es el numero del que sale TODA la
+  -- merma, y si se lo olvidan el lote queda sin merma para siempre.
+  tira_peso_inicial_g    numeric(8, 1) check (tira_peso_inicial_g > 0),
+  tira_peso_tomado_en    timestamptz,
+  tira_peso_origen       text check (tira_peso_origen is null
+                                     or tira_peso_origen in ('manual',
+                                                             'automatico')),
+
+  -- Lo que peso la tira en OTRA balanza, antes de colgarla. Es el
+  -- control de la celda: una balanza sola no se puede controlar a si
+  -- misma, asi que si el peso que toma el sistema no se parece a este,
+  -- sale un mail.
+  tira_peso_referencia_g numeric(8, 1) check (tira_peso_referencia_g > 0),
 
   -- Lo que se embutio en total, para la estimacion de producto restante.
   kg_embutidos        numeric(10, 2) check (kg_embutidos > 0),
@@ -188,7 +202,18 @@ create table config (
   -- Cada cuanto se repite el mail mientras el problema siga abierto,
   -- para no recibir 300 mails iguales en una noche.
   reenvio_min          smallint not null default 120
-                         check (reenvio_min > 0)
+                         check (reenvio_min > 0),
+
+  -- Cuantas horas despues de arrancar el lote se lee la celda para fijar
+  -- el peso inicial de la tira. Dos alcanzan para que la celda se acomode
+  -- y son pocas para que la tira haya perdido algo que importe.
+  horas_peso_automatico numeric(4, 1) not null default 2
+                          check (horas_peso_automatico > 0),
+
+  -- Cuanto puede diferir ese peso del que dio la otra balanza antes de
+  -- que valga la pena avisar.
+  tolerancia_peso_pct   numeric(4, 1) not null default 5
+                          check (tolerancia_peso_pct > 0)
 );
 
 insert into config (id) values (true);
@@ -204,7 +229,8 @@ create table alertas (
   id           bigint generated always as identity primary key,
   lote_id      bigint references lotes (id) on delete set null,
   tipo         text not null
-                 check (tipo in ('temperatura', 'humedad', 'rocio', 'sin_datos')),
+                 check (tipo in ('temperatura', 'humedad', 'rocio',
+                                 'sin_datos', 'peso_inicial')),
   detalle      text not null,
   abierta      boolean not null default true,
   inicio       timestamptz not null default now(),
