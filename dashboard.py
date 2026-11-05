@@ -16,7 +16,8 @@ from supabase import create_client
 
 import estilo
 from cuentas import (MARGEN_ROCIO, MERMA_MINIMA_CREIBLE, TOPE_SUPABASE, ZONA,
-                     merma_de, punto_de_rocio)
+                     etapa_vigente, horas_de_etapa, merma_de, plan_de_etapas,
+                     punto_de_rocio)
 from informe import informe_de_lote
 
 st.set_page_config(page_title="Secadero IoT", layout="wide")
@@ -133,26 +134,19 @@ def etapas(sb, lote_id):
         sb.table("etapas")
         .select("*")
         .eq("lote_id", lote_id)
-        .order("dia_desde")
+        .order("orden")
         .execute()
         .data
         or []
     )
 
 
-def etapa_vigente(lista, fecha_inicio):
-    """La etapa que corresponde al dia que va corriendo el lote.
+def arranque(lote):
+    return pd.to_datetime(lote["fecha_inicio"], utc=True).to_pydatetime()
 
-    Despues de la ultima etapa se siguen usando sus rangos: un lote que se
-    estira no se queda sin control.
-    """
-    if not lista:
-        return None
-    dia = (ahora() - pd.to_datetime(fecha_inicio, utc=True).to_pydatetime()).days
-    for etapa in lista:
-        if etapa["dia_desde"] <= dia <= etapa["dia_hasta"]:
-            return etapa
-    return lista[-1] if dia > lista[-1]["dia_hasta"] else lista[0]
+
+def orden_de(etapa):
+    return etapa.get("orden") or 0
 
 
 # =====================================================================
@@ -308,8 +302,17 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
                     min_value=0.0, value=100.0, step=1.0,
                     help="Solo para estimar cuánto producto queda. No se vuelve a pesar.",
                 )
+                dias = st.number_input(
+                    "Días de secado",
+                    min_value=1, max_value=120, value=25, step=1,
+                    help=(
+                        "Después del estufado se crea una etapa por día, con "
+                        "la temperatura y la humedad bajando de a escalones. "
+                        "Cada una se edita después."
+                    ),
+                )
                 if st.form_submit_button("Crear", type="primary"):
-                    crear_lote(sb, nombre, tira, kilos)
+                    crear_lote(sb, nombre, tira, kilos, dias)
 
         if lote:
             st.markdown("---")
@@ -347,7 +350,46 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
             editor_config(sb)
 
 
-def crear_lote(sb, nombre, tira, kilos):
+#  La receta: el estufado y despues una etapa por dia.
+#
+#  Despues del estufado la camara baja de a escalones diarios. Estos son
+#  los extremos de esa rampa: el primer dia de secado arranca cerca de
+#  como salio de la estufa, y el ultimo llega a la consigna de guarda.
+#  Entre medio se interpola. Todo esto es un punto de partida: se edita
+#  desde la barra lateral, fila por fila.
+RAMPA_TEMP = (18.0, 12.0)
+RAMPA_HUM = (88.0, 72.0)
+BANDA_TEMP = 1.0   # cuanto puede apartarse de la consigna sin que avise
+BANDA_HUM = 3.0
+
+
+def receta_por_defecto(lote_id, dias_de_secado):
+    """Estufado de 48 h y despues un escalon por dia."""
+    etapas_nuevas = [{
+        "lote_id": lote_id, "orden": 1, "nombre": "Estufa / Fermentación",
+        "horas": 48,
+        "temp_min": 20, "temp_max": 24, "hum_min": 85, "hum_max": 95,
+        "tolerancia_min": 30,
+    }]
+
+    for i in range(dias_de_secado):
+        # Con un solo dia de secado no hay rampa que interpolar.
+        avance = i / (dias_de_secado - 1) if dias_de_secado > 1 else 1.0
+        temp = RAMPA_TEMP[0] + (RAMPA_TEMP[1] - RAMPA_TEMP[0]) * avance
+        hum = RAMPA_HUM[0] + (RAMPA_HUM[1] - RAMPA_HUM[0]) * avance
+        etapas_nuevas.append({
+            "lote_id": lote_id, "orden": i + 2, "nombre": f"Día {i + 3}",
+            "horas": 24,
+            "temp_min": round(temp - BANDA_TEMP, 1),
+            "temp_max": round(temp + BANDA_TEMP, 1),
+            "hum_min": round(hum - BANDA_HUM, 1),
+            "hum_max": round(hum + BANDA_HUM, 1),
+            "tolerancia_min": 60,
+        })
+    return etapas_nuevas
+
+
+def crear_lote(sb, nombre, tira, kilos, dias_de_secado):
     if not nombre.strip():
         st.error("Poné un nombre.")
         return
@@ -363,24 +405,31 @@ def crear_lote(sb, nombre, tira, kilos):
         "kg_embutidos": kilos or None,
     }).execute().data[0]
 
-    # Etapas por defecto. Se editan despues desde la barra lateral.
-    sb.table("etapas").insert([
-        {"lote_id": nuevo["id"], "nombre": "Estufa / Fermentación",
-         "dia_desde": 0, "dia_hasta": 2,
-         "temp_min": 20, "temp_max": 24, "hum_min": 85, "hum_max": 95,
-         "tolerancia_min": 30},
-        {"lote_id": nuevo["id"], "nombre": "Secado / Maduración",
-         "dia_desde": 3, "dia_hasta": 21,
-         "temp_min": 12, "temp_max": 16, "hum_min": 72, "hum_max": 82,
-         "tolerancia_min": 60},
-        {"lote_id": nuevo["id"], "nombre": "Estabilización",
-         "dia_desde": 22, "dia_hasta": 180,
-         "temp_min": 10, "temp_max": 14, "hum_min": 70, "hum_max": 78,
-         "tolerancia_min": 120},
-    ]).execute()
+    sb.table("etapas").insert(
+        receta_por_defecto(nuevo["id"], int(dias_de_secado))).execute()
 
     st.success(f"Lote {nombre} creado.")
     st.rerun()
+
+
+def cortar_etapa(sb, lote, lista_etapas, etapa):
+    """Terminar la etapa de ahora y pasar a la que sigue.
+
+    Se guarda lo que duro de verdad. Como cada etapa empieza donde
+    termino la anterior, con eso solo se corren todas las que vienen
+    atras: no hay que tocar ninguna otra fila.
+    """
+    for una, desde, _ in plan_de_etapas(arranque(lote), lista_etapas):
+        if una["id"] != etapa["id"]:
+            continue
+        horas = (ahora() - desde).total_seconds() / 3600
+        if horas < 0.1:
+            st.error("La etapa recién empezó. Esperá al menos unos minutos.")
+            return
+        sb.table("etapas").update(
+            {"horas_reales": round(horas, 2)}).eq("id", etapa["id"]).execute()
+        st.success(f"«{etapa['nombre']}» cerrada a las {horas:.1f} h.")
+        st.rerun()
 
 
 def editor_etapas(sb, lote, lista_etapas):
@@ -388,17 +437,57 @@ def editor_etapas(sb, lote, lista_etapas):
         st.info("Este lote no tiene etapas cargadas.")
         return
 
-    columnas = ["nombre", "dia_desde", "dia_hasta", "temp_min", "temp_max",
+    plan = plan_de_etapas(arranque(lote), lista_etapas)
+    vigente = etapa_vigente(arranque(lote), lista_etapas)
+
+    # --- Cortar la etapa de ahora --------------------------------------
+    if vigente:
+        desde = next(d for e, d, _ in plan if e["id"] == vigente["id"])
+        van = (ahora() - desde).total_seconds() / 3600
+        previstas = horas_de_etapa(vigente)
+        siguiente = next(
+            (e for e in sorted(lista_etapas, key=orden_de)
+             if orden_de(e) > orden_de(vigente)), None)
+
+        st.caption(
+            f"Ahora: **{vigente['nombre']}** · van **{van:.0f} h** de "
+            f"{previstas:.0f} h previstas."
+        )
+        if siguiente:
+            if st.button(f"Terminar y pasar a «{siguiente['nombre']}»",
+                         use_container_width=True):
+                cortar_etapa(sb, lote, lista_etapas, vigente)
+            st.caption(
+                "Es para cuando el pH baja antes de tiempo: se cierra esta "
+                "etapa donde está y **todas las que siguen se corren**."
+            )
+
+    # --- La tabla ------------------------------------------------------
+    columnas = ["nombre", "horas", "temp_min", "temp_max",
                 "hum_min", "hum_max", "tolerancia_min"]
-    tabla = pd.DataFrame(lista_etapas)[["id"] + columnas]
+    # Se arma desde el plan y no desde la lista cruda: asi la fila y la
+    # fecha que muestra son siempre de la misma etapa.
+    tabla = pd.DataFrame([
+        dict(etapa,
+             arranca=f"{desde.astimezone(ZONA):%d/%m %H:%M}",
+             duró=("—" if etapa.get("horas_reales") is None
+                   else f"{float(etapa['horas_reales']):.0f} h"))
+        for etapa, desde, _ in plan
+    ])
+    tabla = tabla[["id", "arranca", "duró"] + columnas]
 
     editada = st.data_editor(
         tabla, hide_index=True, use_container_width=True,
-        disabled=["id"], column_config={
+        disabled=["id", "arranca", "duró"], column_config={
             "id": None,
+            "arranca": st.column_config.TextColumn("Arranca", width="small"),
+            "duró": st.column_config.TextColumn(
+                "Duró", width="small",
+                help="Lo que duró de verdad, si se la cortó a mano."),
             "nombre": st.column_config.TextColumn("Etapa"),
-            "dia_desde": st.column_config.NumberColumn("Día desde", width="small"),
-            "dia_hasta": st.column_config.NumberColumn("Día hasta", width="small"),
+            "horas": st.column_config.NumberColumn(
+                "Horas", width="small", min_value=1,
+                help="Cuánto dura. 48 el estufado, 24 cada día de secado."),
             "temp_min": st.column_config.NumberColumn("T mín", format="%.1f"),
             "temp_max": st.column_config.NumberColumn("T máx", format="%.1f"),
             "hum_min": st.column_config.NumberColumn("H mín", format="%.1f"),
@@ -410,13 +499,15 @@ def editor_etapas(sb, lote, lista_etapas):
         },
     )
 
-    if st.button("Guardar rangos"):
+    if st.button("Guardar la receta"):
         for _, fila in editada.iterrows():
             sb.table("etapas").update(
                 {c: (None if pd.isna(fila[c]) else fila[c]) for c in columnas}
             ).eq("id", int(fila["id"])).execute()
-        st.success("Rangos guardados")
+        st.success("Receta guardada")
         st.rerun()
+
+
 
 
 def editor_config(sb):
@@ -947,7 +1038,7 @@ def main():
     lote = lote_activo(sb)
     lista_etapas = etapas(sb, lote["id"]) if lote else []
     config = sb.table("config").select("*").limit(1).execute().data[0]
-    etapa = etapa_vigente(lista_etapas, lote["fecha_inicio"]) if lote else None
+    etapa = etapa_vigente(arranque(lote), lista_etapas) if lote else None
 
     # El panel muestra lo que el equipo esta midiendo AHORA, haya lote o no.
     # Antes todo colgaba de la primera lectura del lote: sin lote abierto, o

@@ -29,7 +29,8 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
 
 import estilo
-from cuentas import MARGEN_ROCIO, ZONA, margen_de_rocio, merma_de
+from cuentas import (MARGEN_ROCIO, ZONA, horas_de_etapa, margen_de_rocio,
+                     merma_de, plan_de_etapas)
 
 ANCHO_UTIL = A4[0] - 32 * mm
 
@@ -186,6 +187,76 @@ def _grafico(df, columnas, etiqueta_y, bandas=None):
 # =====================================================================
 #  Cuentas del informe
 # =====================================================================
+def _grafico_barras(serie, etiqueta_y, color):
+    """Una barra por dia. Para lo que pasa de a saltos y no de a chorro."""
+    if serie is None or serie.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7.2, 2.3), dpi=170)
+    ax.bar(serie.index, serie.values, width=0.75, color=color, zorder=3)
+    ax.axhline(0, color=estilo.BORDE, linewidth=0.8, zorder=2)
+
+    ax.set_ylabel(etiqueta_y, fontsize=8, color=estilo.TEXTO_SUAVE)
+    ax.tick_params(labelsize=7.5, colors=estilo.TEXTO_SUAVE, length=3)
+    ax.grid(axis="y", color="#f1f3f1", linewidth=0.8, zorder=1)
+    ax.set_axisbelow(True)
+    for lado in ("top", "right"):
+        ax.spines[lado].set_visible(False)
+    for lado in ("left", "bottom"):
+        ax.spines[lado].set_color(estilo.BORDE)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m", tz=ZONA))
+
+    fig.tight_layout(pad=0.4)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return Image(buf, width=ANCHO_UTIL, height=ANCHO_UTIL * 0.315)
+
+
+def _grafico_ph(mediciones):
+    """El pH, que se carga a mano y viene salteado.
+
+    Va con marcadores y no como linea sola: entre una medicion y la
+    siguiente pueden pasar dias, y una linea limpia haria creer que hubo
+    algo medido en el medio. Tambien se marca el 5,3, que es donde se
+    considera que la fermentacion cumplio.
+    """
+    puntos = [(pd.to_datetime(m["medido_en"], utc=True).tz_convert(ZONA),
+               float(m["ph"]))
+              for m in mediciones if m.get("ph") is not None]
+    if len(puntos) < 1:
+        return None
+
+    equis = [p[0] for p in puntos]
+    ies = [p[1] for p in puntos]
+
+    fig, ax = plt.subplots(figsize=(7.2, 2.3), dpi=170)
+    ax.axhline(5.3, color=estilo.AMBAR, linewidth=0.9, linestyle="--",
+               zorder=2)
+    ax.annotate("pH 5,3", xy=(0.995, 5.3), xycoords=("axes fraction", "data"),
+                ha="right", va="bottom", fontsize=7, color=estilo.AMBAR)
+    ax.plot(equis, ies, marker="o", markersize=4.5, linewidth=1.2,
+            color=estilo.VERDE_MARCA, zorder=3)
+
+    ax.set_ylabel("pH", fontsize=8, color=estilo.TEXTO_SUAVE)
+    ax.tick_params(labelsize=7.5, colors=estilo.TEXTO_SUAVE, length=3)
+    ax.grid(axis="y", color="#f1f3f1", linewidth=0.8, zorder=1)
+    ax.set_axisbelow(True)
+    for lado in ("top", "right"):
+        ax.spines[lado].set_visible(False)
+    for lado in ("left", "bottom"):
+        ax.spines[lado].set_color(estilo.BORDE)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m", tz=ZONA))
+
+    fig.tight_layout(pad=0.4)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return Image(buf, width=ANCHO_UTIL, height=ANCHO_UTIL * 0.315)
+
+
 def _resumen(serie):
     """Minimo, promedio y maximo de una columna, o None si esta vacia."""
     s = serie.dropna() if serie is not None else None
@@ -234,23 +305,45 @@ def _tramos_por_etapa(df, etapas, inicio):
 
     Sin esto no se puede decir nada honesto sobre "horas fuera de rango":
     los 22 °C del primer dia son perfectos en la estufa y un desastre en
-    secado. Hay que juzgar cada lectura contra el rango que regia ese dia.
+    secado. Hay que juzgar cada lectura contra el rango que regia en ese
+    momento, y los bordes salen del plan de verdad, con las etapas que se
+    cortaron a mano ya corridas.
     """
     if df.empty or not etapas:
         return []
 
-    dia = (df["momento"] - inicio).dt.days
     tramos = []
-    for i, etapa in enumerate(etapas):
-        # La ultima etapa se estira hasta el final: un lote que dura mas
-        # de lo previsto no se queda sin rangos contra que compararse.
-        ultima = i == len(etapas) - 1
-        dentro = (dia >= etapa["dia_desde"]) if ultima else (
-            (dia >= etapa["dia_desde"]) & (dia <= etapa["dia_hasta"]))
+    for etapa, desde, hasta in plan_de_etapas(inicio, etapas):
+        dentro = df["momento"] >= desde
+        if hasta is not None:
+            dentro &= df["momento"] < hasta
         trozo = df[dentro]
         if not trozo.empty:
             tramos.append((etapa, trozo))
     return tramos
+
+
+def _merma_por_dia(df, peso_inicial):
+    """Cuanto perdio la tira cada dia, en puntos de merma.
+
+    Es la velocidad de secado, que es lo que se mira para saber si va muy
+    rapido (encostramiento) o si se plancho. La curva acumulada no lo
+    muestra: una merma que se frena se ve igual de linda ahi.
+    """
+    if not peso_inicial or "peso_tira_g" not in df:
+        return None
+    pesos = df.dropna(subset=["peso_tira_g"])
+    if pesos.empty:
+        return None
+
+    porfecha = pesos.set_index("momento")["peso_tira_g"].resample("1D").last()
+    porfecha = porfecha.dropna()
+    if len(porfecha) < 2:
+        return None
+
+    # Punto de merma = 1 % del peso inicial perdido ese dia.
+    perdido = -porfecha.diff().dropna() / float(peso_inicial) * 100
+    return perdido
 
 
 # =====================================================================
@@ -333,15 +426,18 @@ def informe_de_lote(lote, df, etapas, mediciones, alertas):
     tramos = _tramos_por_etapa(df, etapas, inicio)
     if tramos:
         partes.append(Spacer(1, 9))
-        filas = [["Etapa", "Días", "Horas\ncon datos",
-                  "Temp. fuera\nde rango", "Humedad fuera\nde rango",
-                  "Al borde\ndel rocío"]]
+        filas = [["Etapa", "Arrancó", "Duró", "Horas\ncon datos",
+                  "Temp.\nfuera", "Humedad\nfuera", "Rocío\nal borde"]]
+        cortadas = 0
         for etapa, trozo in tramos:
             def _h(valor):
                 return "—" if valor is None else f"{valor} h"
+            recortada = etapa.get("horas_reales") is not None
+            cortadas += recortada
             filas.append([
                 etapa["nombre"],
-                f"{etapa['dia_desde']}–{etapa['dia_hasta']}",
+                f"{trozo['momento'].iloc[0]:%d/%m %H:%M}",
+                f"{horas_de_etapa(etapa):.0f} h" + (" *" if recortada else ""),
                 str(len(trozo)),
                 _h(_horas_fuera(trozo.get("temp_sala"),
                                 etapa["temp_min"], etapa["temp_max"])),
@@ -349,13 +445,21 @@ def informe_de_lote(lote, df, etapas, mediciones, alertas):
                                 etapa["hum_min"], etapa["hum_max"])),
                 _h(_horas_al_borde_del_rocio(trozo)),
             ])
-        resto = ANCHO_UTIL - 48 * mm
-        partes.append(_tabla(filas, [48 * mm] + [resto / 5] * 5))
-        partes.append(Paragraph(
-            "Cada lectura se compara contra el rango que regía ese día, no "
-            "contra uno solo: 22 °C son perfectos en la estufa y un desastre "
-            "en secado. Las horas sin lectura no suman, porque no sabemos qué "
-            "pasó ahí adentro mientras el equipo estuvo callado.", s["nota"]))
+        resto = ANCHO_UTIL - 42 * mm - 20 * mm
+        partes.append(_tabla(filas, [42 * mm, 20 * mm] + [resto / 5] * 5))
+
+        nota = (
+            "Cada lectura se compara contra el rango que regía en ese momento, "
+            "no contra uno solo: 22 °C son perfectos en la estufa y un "
+            "desastre en secado. Las horas sin lectura no suman, porque no "
+            "sabemos qué pasó ahí adentro mientras el equipo estuvo callado."
+        )
+        if cortadas:
+            nota += (
+                f" Las {cortadas} etapas marcadas con * se cortaron a mano "
+                "antes de lo previsto, y las que venían atrás se corrieron."
+            )
+        partes.append(Paragraph(nota, s["nota"]))
 
     # ---- Graficos ---------------------------------------------------
     # Cada etapa pinta su rango solo sobre los dias en que estuvo vigente.
@@ -387,7 +491,28 @@ def informe_de_lote(lote, df, etapas, mediciones, alertas):
         img = _grafico(copia, ["Merma (%)"], "%")
         if img is not None:
             partes.append(_junto(
-                Paragraph("Merma de la tira", s["seccion"]), img))
+                Paragraph("Merma acumulada", s["seccion"]), img))
+
+        diaria = _merma_por_dia(df, inicial)
+        img = _grafico_barras(diaria, "% por día",
+                              estilo.COLORES_SERIES["Merma (%)"])
+        if img is not None:
+            pico = diaria.max()
+            cuando = diaria.idxmax()
+            partes.append(_junto(
+                Paragraph("Merma por día", s["seccion"]), img,
+                Paragraph(
+                    f"Cuánto perdió cada día, que es la velocidad de secado. "
+                    f"El día más rápido fue el {cuando:%d/%m}, con "
+                    f"{pico:.2f} puntos. Una caída muy pareja y muy alta al "
+                    f"principio es la que encostra la tripa: el agua sale de "
+                    f"la superficie más rápido de lo que llega desde adentro.",
+                    s["nota"])))
+
+    # ---- pH ---------------------------------------------------------
+    img = _grafico_ph(mediciones or [])
+    if img is not None:
+        partes.append(_junto(Paragraph("pH", s["seccion"]), img))
 
     # ---- Mediciones a mano ------------------------------------------
     if mediciones:

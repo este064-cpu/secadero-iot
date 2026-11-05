@@ -26,7 +26,7 @@ from supabase import create_client
 # panel. Antes estaban copiadas aca y en dashboard.py, y el dia que una de
 # las dos cambiara el mail y la pantalla iban a decir cosas distintas del
 # mismo momento.
-from cuentas import MARGEN_ROCIO, ZONA, punto_de_rocio
+from cuentas import MARGEN_ROCIO, ZONA, etapa_vigente, punto_de_rocio
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -129,16 +129,6 @@ def cerrar(lote, tipo, titulo, config):
 # =====================================================================
 #  Cuentas
 # =====================================================================
-def etapa_vigente(etapas, fecha_inicio):
-    if not etapas:
-        return None
-    dia = (datetime.now(timezone.utc) - datetime.fromisoformat(fecha_inicio)).days
-    for etapa in etapas:
-        if etapa["dia_desde"] <= dia <= etapa["dia_hasta"]:
-            return etapa
-    return etapas[-1]
-
-
 def minutos_seguidos_mal(lecturas, esta_mal):
     """Hace cuantos minutos que TODAS las lecturas vienen mal.
 
@@ -200,9 +190,9 @@ def revisar():
     # --- Rangos de la etapa -------------------------------------------
     etapas = (
         sb.table("etapas").select("*").eq("lote_id", lote["id"])
-        .order("dia_desde").execute().data or []
+        .order("orden").execute().data or []
     )
-    etapa = etapa_vigente(etapas, lote["fecha_inicio"])
+    etapa = etapa_vigente(datetime.fromisoformat(lote["fecha_inicio"]), etapas)
     if not etapa:
         print("El lote no tiene etapas cargadas: sin rangos que controlar.")
         return

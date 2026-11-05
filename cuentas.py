@@ -13,7 +13,7 @@ el mismo numero que MARGEN_ROCIO de aca.
 """
 
 import math
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 ZONA = timezone(timedelta(hours=-3))  # Argentina
 
@@ -60,6 +60,67 @@ def margen_de_rocio(temp_sala, hum_sala, temp_sup):
     if rocio is None or temp_sup is None:
         return None
     return float(temp_sup) - rocio
+
+
+# ---------------------------------------------------------------------
+#  El plan de etapas
+# ---------------------------------------------------------------------
+def plan_de_etapas(fecha_inicio, etapas):
+    """Cuando empieza y cuando termina cada etapa, de verdad.
+
+    Las etapas no tienen fecha propia: tienen una DURACION. La primera
+    arranca cuando arranco el lote, y cada una empieza donde termino la
+    anterior.
+
+    Esto es asi porque en la camara las etapas no pasan cuando dice el
+    calendario. El estufado se programa en 48 horas, pero si el pH baja a
+    las 31 se saca igual, y todo lo que viene atras se corre 17 horas. Con
+    dias fijos (dia 0 a 2, dia 3 a 21) habia que reescribir a mano todos
+    los numeros del lote cada vez que eso pasaba.
+
+    Cuando una etapa se corta a mano queda guardado en "horas_reales", y
+    desde ahi para adelante el plan entero se desplaza solo.
+
+    Devuelve [(etapa, inicio, fin)], en orden. El "fin" de la ultima es
+    None: un lote que se estira no se queda sin etapa.
+    """
+    if not etapas:
+        return []
+
+    ordenadas = sorted(etapas, key=lambda e: e.get("orden") or 0)
+    plan = []
+    momento = fecha_inicio
+
+    for i, etapa in enumerate(ordenadas):
+        ultima = i == len(ordenadas) - 1
+        horas = etapa.get("horas_reales")
+        if horas is None:
+            horas = etapa.get("horas") or 24
+        fin = None if ultima else momento + timedelta(hours=float(horas))
+        plan.append((etapa, momento, fin))
+        momento = fin
+
+    return plan
+
+
+def etapa_vigente(fecha_inicio, etapas, momento=None):
+    """La etapa que corre en este momento, o la ultima si ya pasaron todas."""
+    plan = plan_de_etapas(fecha_inicio, etapas)
+    if not plan:
+        return None
+
+    momento = momento or datetime.now(timezone.utc)
+    for etapa, desde, hasta in plan:
+        if desde <= momento and (hasta is None or momento < hasta):
+            return etapa
+    # Antes del inicio del lote (reloj desfasado): la primera.
+    return plan[0][0]
+
+
+def horas_de_etapa(etapa):
+    """Cuanto duro o va a durar, en horas, para mostrarlo."""
+    reales = etapa.get("horas_reales")
+    return float(reales if reales is not None else (etapa.get("horas") or 24))
 
 
 def merma_de(peso_inicial, peso_ahora):

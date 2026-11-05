@@ -60,7 +60,20 @@ create unique index lotes_uno_activo on lotes (estado) where estado = 'Activo';
 create index lotes_inicio_idx on lotes (fecha_inicio desc);
 
 -- ---------------------------------------------------------------------
---  2. etapas — los rangos esperados, por etapa, de un lote.
+--  2. etapas — los rangos esperados, en orden, de un lote.
+--
+--  Cada etapa tiene una DURACION, no un dia fijo de calendario. La
+--  primera arranca cuando arranca el lote y cada una empieza donde
+--  termino la anterior.
+--
+--  Es asi porque en la camara las etapas no pasan cuando dice el
+--  almanaque: el estufado se programa en 48 horas, pero si el pH baja a
+--  las 31 se saca igual. Con duraciones, cortar una etapa corre a todas
+--  las siguientes sin tocar ningun otro numero; con dias fijos habia que
+--  reescribir el lote entero a mano.
+--
+--  "horas_reales" queda en null mientras la etapa dure lo previsto, y se
+--  llena cuando se la corta a mano desde el panel.
 --
 --  "tolerancia_min" es lo que pidio Esteban: cuantos minutos seguidos
 --  tiene que estar fuera de rango antes de que salga el mail. Una puerta
@@ -69,9 +82,11 @@ create index lotes_inicio_idx on lotes (fecha_inicio desc);
 create table etapas (
   id             bigint generated always as identity primary key,
   lote_id        bigint not null references lotes (id) on delete cascade,
+  orden          smallint not null,
   nombre         text not null,
-  dia_desde      smallint not null check (dia_desde >= 0),
-  dia_hasta      smallint not null,
+
+  horas          integer not null default 24 check (horas > 0),
+  horas_reales   numeric(8, 2) check (horas_reales is null or horas_reales > 0),
 
   temp_min       numeric(4, 1),
   temp_max       numeric(4, 1),
@@ -80,8 +95,7 @@ create table etapas (
 
   tolerancia_min smallint not null default 30 check (tolerancia_min >= 0),
 
-  unique (lote_id, dia_desde),
-  check (dia_hasta >= dia_desde),
+  unique (lote_id, orden),
   check (temp_min is null or temp_max is null or temp_min <= temp_max),
   check (hum_min  is null or hum_max  is null or hum_min  <= hum_max)
 );

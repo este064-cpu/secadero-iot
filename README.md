@@ -22,6 +22,13 @@ aviso tiene que poder salir igual.
 En el editor SQL de Supabase, pegar y correr `sql/esquema.sql`
 entero. **Ojo: borra las tablas viejas** (`lotes`, `secado`, `galeria`).
 
+Si la base **ya estaba andando**, no se vuelve a correr `esquema.sql`: hay
+que aplicar las migraciones que falten, en orden, que no borran nada.
+
+| Archivo | Qué hace |
+|---|---|
+| `sql/002-etapas-en-horas.sql` | Pasa las etapas de días fijos a duraciones. Convierte solo las que ya existan. |
+
 > La carpeta se llama `sql/` y no `supabase/` a propósito: una carpeta
 > llamada igual que la librería la tapa al importarla y el panel no
 > arranca.
@@ -200,6 +207,28 @@ aparte, y no hay forma de evitarlo, es el firmware: está en otro lenguaje y
 en otra máquina, así que `MARGEN_ROCIO_AVISO` de `secadero.ino` tiene que
 seguir a mano el mismo número que `MARGEN_ROCIO` de `cuentas.py`.
 
+**Las etapas tienen duración, no día de calendario.** La primera arranca
+cuando arranca el lote y cada una empieza donde terminó la anterior. Es
+así porque en la cámara las cosas no pasan cuando dice el almanaque: el
+estufado se programa en 48 h, pero si el pH baja a las 31 se saca igual.
+
+Con duraciones, cortar una etapa **corre a todas las que siguen** y no hay
+que tocar ningún otro número. Con días fijos (del día 0 al 2, del 3 al 21)
+había que reescribir el lote entero a mano cada vez que eso pasaba, que es
+siempre.
+
+El botón **«Terminar y pasar a…»** de la barra lateral guarda en
+`horas_reales` lo que la etapa duró de verdad. Mientras ese campo esté en
+null, la etapa dura lo previsto. No hay ningún proceso que avance las
+etapas de fondo: el plan se calcula cada vez a partir de las duraciones,
+así que el panel y los mails no pueden quedar desfasados entre sí.
+
+**Un lote nuevo se crea con el estufado y una etapa por día.** Después del
+estufado la cámara baja de a escalones diarios, así que la receta por
+defecto interpola entre 18 °C / 88 % el primer día de secado y 12 °C /
+72 % el último, con una banda de ±1 °C y ±3 %. Son un punto de partida:
+cada fila se edita desde la barra lateral.
+
 **El panel se ve como la app de Flujo de Fondos, a propósito.** La paleta y
 las formas salen de su `Diseño y estilo.md`: fondo blanco, tarjetas con
 borde fino y esquinas redondeadas, verde `#2e6f1f` de marca, nada de tema
@@ -216,11 +245,19 @@ headless: una pieza más que se puede romper sin aviso en Streamlit Cloud.
 Matplotlib dibuja un PNG y listo. Los colores son los mismos, así que la
 línea de temperatura del informe es del mismo color que la del panel.
 
-**En el informe, cada lectura se juzga contra el rango del día que fue.**
-22 °C son perfectos en la estufa y un desastre en secado, así que las horas
-fuera de rango se cuentan etapa por etapa y nunca contra un rango único.
-Las horas sin lectura no suman: mientras el equipo estuvo callado no
-sabemos qué pasó ahí adentro, y contarlas como "en rango" sería inventarlo.
+**En el informe, cada lectura se juzga contra el rango que regía en ese
+momento.** 22 °C son perfectos en la estufa y un desastre en secado, así
+que las horas fuera de rango se cuentan etapa por etapa y nunca contra un
+rango único. Los bordes salen del plan de verdad, con las etapas cortadas
+a mano ya corridas, y en la tabla van marcadas con un asterisco. Las horas
+sin lectura no suman: mientras el equipo estuvo callado no sabemos qué
+pasó ahí adentro, y contarlas como "en rango" sería inventarlo.
+
+**El informe muestra la merma de dos maneras y las dos hacen falta.** La
+acumulada dice cuánto perdió en total; la de por día dice a qué velocidad.
+Una merma que se frenó se ve igual de linda en la curva acumulada, y una
+caída muy alta y muy pareja al principio es justamente la que encostra la
+tripa. Eso solo se ve en las barras diarias.
 
 **El panel muestra lo que el equipo mide ahora, haya lote o no.** Los
 sensores y la celda no saben de lotes: sirven igual para calibrar la
