@@ -22,17 +22,11 @@ from email.message import EmailMessage
 
 from supabase import create_client
 
-ZONA = timezone(timedelta(hours=-3))
-
-# Cuanto puede acercarse la superficie de la tripa al punto de rocio antes
-# de que valga la pena avisar. Con 0 el mail sale cuando la tripa ya esta
-# mojada, que es tarde: para cuando uno llega, la pelicula ya esta.
-#
-# Es el mismo medio grado que usa el firmware (MARGEN_ROCIO_AVISO en
-# secadero.ino, que lo muestra como "AL BORDE" en el monitor serie). Si los
-# dos no usan el mismo numero, el equipo y el mail dicen cosas distintas
-# del mismo momento.
-MARGEN_ROCIO = 0.5
+# El margen de rocio y la formula viven en cuentas.py, junto con las del
+# panel. Antes estaban copiadas aca y en dashboard.py, y el dia que una de
+# las dos cambiara el mail y la pantalla iban a decir cosas distintas del
+# mismo momento.
+from cuentas import MARGEN_ROCIO, ZONA, punto_de_rocio
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -135,15 +129,6 @@ def cerrar(lote, tipo, titulo, config):
 # =====================================================================
 #  Cuentas
 # =====================================================================
-def punto_de_rocio(temp, humedad):
-    import math
-    if temp is None or humedad is None or humedad <= 0:
-        return None
-    a, b = 17.625, 243.04
-    alfa = math.log(float(humedad) / 100.0) + (a * float(temp)) / (b + float(temp))
-    return (b * alfa) / (a - alfa)
-
-
 def etapa_vigente(etapas, fecha_inicio):
     if not etapas:
         return None

@@ -5,7 +5,7 @@ Lee la telemetria que manda el ESP32 y la muestra para Esteban y Rafael.
 Nada de esto se puede ver sin estar logueado.
 """
 
-import math
+import html
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -14,21 +14,13 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from supabase import create_client
 
-ZONA = timezone(timedelta(hours=-3))  # Argentina
-TOPE_SUPABASE = 1000  # lo que devuelve Supabase por pedido, aunque no avise
-
-# Margen de aviso de condensacion: el mismo medio grado que usan el
-# firmware ("AL BORDE" en el monitor serie) y alertas.py. Si el panel
-# esperara a que la superficie toque el punto de rocio, el cartel verde
-# estaria mintiendo justo el rato en que todavia se podia hacer algo.
-MARGEN_ROCIO = 0.5
-
-# Una tira no engorda. Si la merma da muy negativa, lo que esta mal no es el
-# secadero: es el peso inicial que quedo cargado en el lote. Un par de puntos
-# negativos son ruido de la celda; cien mil son un dato cargado mal.
-MERMA_MINIMA_CREIBLE = -10.0
+import estilo
+from cuentas import (MARGEN_ROCIO, MERMA_MINIMA_CREIBLE, TOPE_SUPABASE, ZONA,
+                     merma_de, punto_de_rocio)
+from informe import informe_de_lote
 
 st.set_page_config(page_title="Secadero IoT", layout="wide")
+estilo.aplicar()
 
 
 # =====================================================================
@@ -49,7 +41,7 @@ def conexion():
 
 
 def pantalla_login(sb):
-    st.title("🥩 Secadero Nostro")
+    st.title("Secadero Nostro")
     st.caption("Panel de control del secadero. Hay que ingresar para verlo.")
 
     with st.form("login"):
@@ -170,19 +162,6 @@ def ahora():
     return datetime.now(timezone.utc)
 
 
-def punto_de_rocio(temp, humedad):
-    """Formula de Magnus.
-
-    La cuenta de bolsillo (T - (100-HR)/5) erra hasta un grado justo en el
-    margen que decide si hay condensacion, que es lo unico que importa aca.
-    """
-    if temp is None or humedad is None or humedad <= 0:
-        return None
-    a, b = 17.625, 243.04
-    alfa = math.log(humedad / 100.0) + (a * float(temp)) / (b + float(temp))
-    return (b * alfa) / (a - alfa)
-
-
 def merma_de_la_tira(lote, lectura):
     """La merma medida: la tira testigo contra su propio peso inicial.
 
@@ -191,11 +170,7 @@ def merma_de_la_tira(lote, lectura):
     """
     if not lote or not lectura:
         return None
-    peso = lectura.get("peso_tira_g")
-    inicial = lote.get("tira_peso_inicial_g")
-    if peso is None or not inicial:
-        return None
-    return (float(inicial) - float(peso)) / float(inicial) * 100.0
+    return merma_de(lote.get("tira_peso_inicial_g"), lectura.get("peso_tira_g"))
 
 
 def producto_estimado(lote, merma):
@@ -238,7 +213,7 @@ def peso_inicial_de_la_tira(sb, lote, lectura):
     que elegir entre anotar un peso que todavia se esta acomodando o cerrar
     el lote y volver a abrirlo.
     """
-    with st.expander("⚖️ Peso de la tira testigo"):
+    with st.expander("Peso de la tira testigo"):
         st.caption(
             "Se carga **después** de colgar la tira y de dejar la celda unas "
             "horas quieta. La celda se acomoda sola los primeros minutos, y "
@@ -276,14 +251,14 @@ def guardar_peso_tira(sb, lote, gramos):
 
 def barra_lateral(sb, lote, lista_etapas, lectura=None):
     with st.sidebar:
-        st.caption(f"👤 {st.session_state.usuario}")
+        st.caption(st.session_state.usuario)
         if st.button("Salir"):
             sb.auth.sign_out()
             st.session_state.clear()
             st.rerun()
 
         st.markdown("---")
-        st.header("📦 Lote")
+        st.header("Lote")
 
         if lote:
             st.success(f"**{lote['nombre']}** — activo")
@@ -297,7 +272,7 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
             # como "0 g" y parece un dato faltante en vez de un dato absurdo.
             st.caption(
                 f"Tira testigo: {float(tira):g} g" if tira
-                else "⚠️ Falta el peso de la tira"
+                else "Falta el peso de la tira"
             )
             if lote.get("kg_embutidos"):
                 st.caption(f"Embutido: {float(lote['kg_embutidos']):.0f} kg")
@@ -312,7 +287,7 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
         else:
             st.warning("No hay ningún lote activo.")
 
-        with st.expander("➕ Iniciar lote nuevo"):
+        with st.expander("Iniciar lote nuevo"):
             with st.form("nuevo_lote"):
                 nombre = st.text_input("Nombre", placeholder="Salame 2026-11")
                 # Arranca en 0 a proposito: lo correcto es colgar la tira,
@@ -338,7 +313,7 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
 
         if lote:
             st.markdown("---")
-            st.header("🎚️ Rangos por etapa")
+            st.header("Rangos por etapa")
             st.caption(
                 "Los rangos y los minutos de tolerancia se guardan en la base: "
                 "los ven igual los dos y de acá salen los mails."
@@ -346,7 +321,7 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
             editor_etapas(sb, lote, lista_etapas)
 
             st.markdown("---")
-            st.header("📝 Carga manual")
+            st.header("Carga manual")
             with st.form("medicion"):
                 fecha = st.date_input("Fecha", value=datetime.now(ZONA).date())
                 hora = st.time_input("Hora", value=datetime.now(ZONA).time())
@@ -368,7 +343,7 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
                     st.rerun()
 
         st.markdown("---")
-        with st.expander("✉️ Avisos por mail"):
+        with st.expander("Avisos por mail"):
             editor_config(sb)
 
 
@@ -485,104 +460,218 @@ def encabezado(lote, etapa, lectura, config, del_lote):
     mismo y hay que decirlo: si no, el panel muestra numeros de ayer como
     si fueran del lote de hoy.
     """
-    st.title("🥩 Panel de control — Secadero")
+    st.title("Panel de control — Secadero")
 
     if not lectura:
-        st.warning(
-            "Todavía no llegó **ninguna** lectura del ESP32. Si el equipo "
-            "está encendido, revisá el wifi y el token del firmware."
+        estilo.aviso(
+            "mal", "No llegó ninguna lectura todavía.",
+            "El panel está vacío porque el ESP32 nunca mandó nada.",
+            "Si el equipo está encendido, revisar el wifi y el token del "
+            "firmware.",
         )
         return
 
     medido = pd.to_datetime(lectura["medido_en"], utc=True).to_pydatetime()
     minutos = (ahora() - medido).total_seconds() / 60
-    sello = (
-        f"Última lectura: **{texto_antiguedad(medido)}** "
-        f"({medido.astimezone(ZONA).strftime('%d/%m/%Y %H:%M')})"
-    )
+    cuando = medido.astimezone(ZONA).strftime("%d/%m/%Y %H:%M")
 
     # Lo mas importante de la pantalla: si el dato es viejo, los numeros de
     # abajo son una foto vieja y hay que decirlo fuerte.
     if minutos > config["minutos_sin_lecturas"]:
-        st.error(
-            f"⚠️ {sello}. El equipo no está mandando datos: "
-            "lo que se ve abajo es viejo."
+        estilo.aviso(
+            "mal", f"El equipo no manda datos {texto_antiguedad(medido)}.",
+            f"La última lectura es del {cuando}. Todo lo que se ve abajo es "
+            "esa foto vieja, no el secadero de ahora.",
+            "Puede ser el wifi, la corriente o el equipo colgado.",
         )
-    elif minutos > 15:
-        st.warning(f"{sello}")
     else:
-        st.caption(f"🟢 {sello}")
+        color = estilo.VERDE if minutos <= 15 else estilo.AMBAR
+        estilo.cinta(
+            color,
+            f"Última lectura <b>{texto_antiguedad(medido)}</b> &nbsp;·&nbsp; "
+            f"{cuando}",
+        )
 
     if not lote:
-        st.info(
-            "**No hay ningún lote abierto.** Lo que se ve abajo es lo que el "
-            "equipo está midiendo ahora mismo, que sirve igual para calibrar "
-            "la balanza o para mirar la cámara vacía.\n\n"
-            "**Sin lote abierto no sale ningún mail de alerta.** Los rangos de "
-            "temperatura y humedad viven en las etapas del lote: sin lote no "
-            "hay contra qué comparar."
+        estilo.aviso(
+            "info", "No hay ningún lote abierto.",
+            "Abajo está lo que el equipo mide ahora mismo, que sirve igual "
+            "para calibrar la balanza o para mirar la cámara vacía. Pero sin "
+            "lote no sale ningún mail: los rangos de temperatura y humedad "
+            "viven en las etapas del lote, así que no hay contra qué comparar.",
         )
         return
 
     nombre_etapa = etapa["nombre"] if etapa else "sin etapa"
     rangos = (
-        f"T {etapa['temp_min']}-{etapa['temp_max']}°C · "
-        f"H {etapa['hum_min']}-{etapa['hum_max']}%"
+        f" &nbsp;·&nbsp; T {etapa['temp_min']}-{etapa['temp_max']}°C "
+        f"&nbsp;·&nbsp; H {etapa['hum_min']}-{etapa['hum_max']}%"
         if etapa else ""
     )
-    st.caption(f"Lote **{lote['nombre']}** · Etapa **{nombre_etapa}** · {rangos}")
+    inicio = pd.to_datetime(lote["fecha_inicio"], utc=True)
+    st.markdown(
+        f'<div class="cinta"><span>Lote <b>{html.escape(lote["nombre"])}</b>'
+        f" &nbsp;·&nbsp; día <b>{(ahora() - inicio.to_pydatetime()).days}</b>"
+        f" &nbsp;·&nbsp; {html.escape(nombre_etapa)}{rangos}</span></div>",
+        unsafe_allow_html=True,
+    )
 
     if not del_lote:
-        st.info(
-            f"Esta lectura es **anterior al lote**: el equipo viene midiendo, "
-            f"pero todavía no entró ninguna lectura adentro de "
-            f"«{lote['nombre']}». La primera llega en los próximos minutos, y "
-            f"hasta entonces tampoco salen mails."
+        estilo.aviso(
+            "info", "Esta lectura es anterior al lote.",
+            f"El equipo viene midiendo, pero todavía no entró ninguna lectura "
+            f"adentro de «{lote['nombre']}». La primera llega en los próximos "
+            "minutos, y hasta entonces tampoco salen mails.",
         )
 
 
+def _tono(texto):
+    """Gris apagado cuando no hay dato, para que no compita con los numeros
+    de verdad."""
+    return "sin" if texto.startswith("—") else ""
+
+
 def indicadores(lote, lectura):
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🌡️ Temp. sala", valor(lectura, "temp_sala", "°C"))
-    c2.metric("💧 Humedad", valor(lectura, "hum_sala", "%"))
-    c3.metric("🎯 Temp. núcleo", valor(lectura, "temp_nucleo", "°C"))
-    c4.metric("🔦 Superficie", valor(lectura, "temp_sup", "°C"))
+    ambiente = [
+        ("Temp. sala",   valor(lectura, "temp_sala", "°C"),   "", None),
+        ("Humedad",      valor(lectura, "hum_sala", "%"),     "", None),
+        ("Temp. núcleo", valor(lectura, "temp_nucleo", "°C"), "", None),
+        ("Superficie",   valor(lectura, "temp_sup", "°C"),    "", None),
+    ]
+    estilo.kpis([(e, v, _tono(v) or t, p) for e, v, t, p in ambiente])
 
     merma = merma_de_la_tira(lote, lectura)
+    peso = valor(lectura, "peso_tira_g", "g", 0)
 
     # Sin lote no hay merma posible: la merma se mide contra el peso inicial
     # de la tira, y ese numero se carga al abrir el lote. Lo que si hay es el
     # peso crudo de la celda, que es justo lo que uno mira al calibrar.
     if not lote:
-        st.metric(
-            "⚖️ Balanza",
-            valor(lectura, "peso_tira_g", "g", 0),
-            help="Lo que cuelga de la celda en este momento.",
-        )
+        estilo.kpis([("Balanza", peso, _tono(peso),
+                      "lo que cuelga de la celda ahora")])
         return None
 
     estimado = producto_estimado(lote, merma)
-
     dudosa = merma is not None and merma < MERMA_MINIMA_CREIBLE
+    inicial = lote.get("tira_peso_inicial_g")
 
-    c5, c6, c7 = st.columns(3)
-    c5.metric("⚖️ Tira testigo", valor(lectura, "peso_tira_g", "g", 0))
-    c6.metric(
-        "📉 Merma medida",
-        "⚠️ revisar" if dudosa else
-        "— sin dato" if merma is None else f"{merma:.1f} %",
-        help="La tira testigo contra su propio peso inicial. Es lo único que se mide.",
-    )
-    c7.metric(
-        "📦 Producto estimado",
-        "⚠️ revisar" if dudosa else
-        "— sin dato" if estimado is None else f"{estimado:.0f} kg",
-        help=(
-            "Estimación: la merma de la tira aplicada a los kilos embutidos. "
-            "Es una cuenta aproximada, no una pesada."
-        ),
-    )
+    if dudosa:
+        texto_merma, tono_merma = "revisar", "neg"
+        texto_prod, tono_prod = "revisar", "neg"
+    else:
+        texto_merma = "— sin dato" if merma is None else f"{merma:.1f} %"
+        tono_merma = "sin" if merma is None else "pos"
+        texto_prod = "— sin dato" if estimado is None else f"{estimado:.0f} kg"
+        tono_prod = _tono(texto_prod)
+
+    estilo.kpis([
+        ("Tira testigo", peso, _tono(peso),
+         f"arrancó en {float(inicial):g} g" if inicial else "falta el peso inicial"),
+        ("Merma medida", texto_merma, tono_merma,
+         "la tira contra su propio peso inicial"),
+        ("Producto estimado", texto_prod, tono_prod,
+         "estimación, no una pesada"),
+    ])
     return merma
+
+
+# ---------------------------------------------------------------------
+#  Los juicios
+#
+#  Cada uno devuelve (tono, titulo, texto, accion) y no dibuja nada. Asi
+#  el panel y el PDF del lote dicen exactamente lo mismo del mismo dato,
+#  en vez de tener dos redacciones que con el tiempo se separan.
+# ---------------------------------------------------------------------
+def juicio_temperatura(lectura, etapa):
+    temp = lectura.get("temp_sala")
+    if temp is None:
+        return ("info", "Sin dato", "El sensor de sala no está contestando.", None)
+    temp = float(temp)
+    if not etapa:
+        return ("info", f"{temp:.1f} °C",
+                "Sin lote abierto no hay rango contra qué compararla.", None)
+    if etapa["temp_max"] is not None and temp > float(etapa["temp_max"]):
+        return ("mal", f"{temp:.1f} °C — demasiado alta",
+                f"Pasa los {etapa['temp_max']} °C de la etapa. Se funde la "
+                "grasa de la superficie y la acidez se descontrola.",
+                "Bajar el termostato.")
+    if etapa["temp_min"] is not None and temp < float(etapa["temp_min"]):
+        return ("ojo", f"{temp:.1f} °C — demasiado baja",
+                f"Está por debajo de los {etapa['temp_min']} °C de la etapa. "
+                "La maduración se frena.",
+                "Subir la calefacción.")
+    return ("ok", f"{temp:.1f} °C — en rango",
+            f"La etapa pide entre {etapa['temp_min']} y {etapa['temp_max']} °C.",
+            None)
+
+
+def juicio_humedad(lectura, etapa):
+    hum = lectura.get("hum_sala")
+    if hum is None:
+        return ("info", "Sin dato", "El sensor de humedad no está contestando.", None)
+    hum = float(hum)
+    if not etapa:
+        return ("info", f"{hum:.1f} %",
+                "Sin lote abierto no hay rango contra qué compararla.", None)
+    if etapa["hum_min"] is not None and hum < float(etapa["hum_min"]):
+        return ("mal", f"{hum:.1f} % — demasiado seca",
+                f"Está por debajo del {etapa['hum_min']} % de la etapa. La "
+                "tripa se encostra y el anillo de secado tapa la salida de "
+                "humedad de adentro.",
+                "Apagar forzadores y subir la humedad.")
+    if etapa["hum_max"] is not None and hum > float(etapa["hum_max"]):
+        return ("ojo", f"{hum:.1f} % — demasiado húmeda",
+                f"Pasa el {etapa['hum_max']} % de la etapa. La merma se frena "
+                "y aparece flora que no queremos.",
+                "Renovar aire.")
+    return ("ok", f"{hum:.1f} % — en rango",
+            f"La etapa pide entre {etapa['hum_min']} y {etapa['hum_max']} %.",
+            None)
+
+
+def juicio_merma(lote, lectura, merma):
+    if not lote:
+        return ("info", "Sin lote",
+                "La merma se mide contra el peso inicial de la tira testigo, "
+                "que se carga al abrir el lote.", None)
+    if merma is None:
+        return ("info", "Sin merma",
+                "Falta el peso inicial de la tira o la celda no está mandando "
+                "dato.", None)
+    if merma < MERMA_MINIMA_CREIBLE:
+        return ("mal", "El peso inicial de la tira está mal cargado",
+                f"En el lote figura {float(lote['tira_peso_inicial_g']):g} g y "
+                f"la celda marca {float(lectura['peso_tira_g']):.0f} g, así que "
+                f"la merma daría {merma:.0f} %.",
+                "Corregirlo en «Peso de la tira testigo», en la barra lateral. "
+                "No hace falta cerrar el lote.")
+    return ("ok", f"{merma:.1f} % perdido",
+            "Es lo que bajó la tira testigo respecto de su propio peso "
+            "inicial.", None)
+
+
+def juicio_condensacion(lectura):
+    rocio = punto_de_rocio(lectura.get("temp_sala"), lectura.get("hum_sala"))
+    sup = lectura.get("temp_sup")
+    if rocio is None or sup is None:
+        return ("info", "Sin dato",
+                "Falta temperatura, humedad o el infrarrojo para calcular el "
+                "punto de rocío.", None)
+    sup = float(sup)
+    margen = sup - rocio
+    if margen <= 0:
+        return ("mal", "La tripa está transpirando",
+                f"La superficie está a {sup:.1f} °C y el rocío es "
+                f"{rocio:.1f} °C: el agua ya se le está condensando encima.",
+                "Bajar la humedad y ventilar para secar la película.")
+    if margen <= MARGEN_ROCIO:
+        return ("ojo", f"Al borde — le quedan {margen:.1f} °C",
+                f"La superficie está a {sup:.1f} °C contra un rocío de "
+                f"{rocio:.1f} °C. Todavía está seca, pero por poco.",
+                "Bajar la humedad ahora, antes de que moje.")
+    return ("ok", f"Sin riesgo — {margen:.1f} °C de margen",
+            f"La superficie está a {sup:.1f} °C y el rocío es {rocio:.1f} °C.",
+            None)
 
 
 def diagnostico(lectura, etapa, merma, lote):
@@ -594,110 +683,24 @@ def diagnostico(lectura, etapa, merma, lote):
     temperatura y la humedad, en cambio, se juzgan contra los rangos de la
     etapa, y esos si vienen del lote.
     """
-    st.subheader("🚦 Diagnóstico")
+    st.subheader("Diagnóstico")
 
-    c1, c2 = st.columns(2)
+    bloques = [
+        ("Temperatura",  juicio_temperatura(lectura, etapa)),
+        ("Humedad",      juicio_humedad(lectura, etapa)),
+        ("Merma",        juicio_merma(lote, lectura, merma)),
+        ("Condensación", juicio_condensacion(lectura)),
+    ]
 
-    with c1:
-        st.markdown("#### Temperatura")
-        temp = lectura.get("temp_sala")
-        if temp is None:
-            st.info("Sin dato del sensor de sala.")
-        elif not etapa:
-            st.info(
-                f"La sala está a **{float(temp):.1f}°C**.\n\n"
-                "Sin lote abierto no hay rango contra qué compararla."
-            )
-        elif etapa["temp_max"] is not None and float(temp) > float(etapa["temp_max"]):
-            st.error(
-                f"**Riesgo:** fusión de grasa superficial y acidez descontrolada "
-                f"(supera {etapa['temp_max']}°C).\n\n**Acción:** bajar el termostato."
-            )
-        elif etapa["temp_min"] is not None and float(temp) < float(etapa["temp_min"]):
-            st.warning(
-                f"**Riesgo:** se frena la maduración (por debajo de "
-                f"{etapa['temp_min']}°C).\n\n**Acción:** subir la calefacción."
-            )
-        else:
-            st.success("✅ Temperatura en rango.")
-
-    with c2:
-        st.markdown("#### Humedad")
-        hum = lectura.get("hum_sala")
-        if hum is None:
-            st.info("Sin dato del sensor de humedad.")
-        elif not etapa:
-            st.info(
-                f"La sala está al **{float(hum):.1f} %**.\n\n"
-                "Sin lote abierto no hay rango contra qué compararla."
-            )
-        elif etapa["hum_min"] is not None and float(hum) < float(etapa["hum_min"]):
-            st.error(
-                f"**Riesgo:** encostramiento de la tripa, el anillo de secado "
-                f"bloquea la salida de humedad (por debajo de {etapa['hum_min']}%)."
-                f"\n\n**Acción:** apagar forzadores y subir la humedad."
-            )
-        elif etapa["hum_max"] is not None and float(hum) > float(etapa["hum_max"]):
-            st.warning(
-                f"**Riesgo:** se frena la merma y aparece flora no deseada "
-                f"(supera {etapa['hum_max']}%).\n\n**Acción:** renovar aire."
-            )
-        else:
-            st.success("✅ Humedad en rango.")
-
-    c3, c4 = st.columns(2)
-
-    with c3:
-        st.markdown("#### Merma")
-        if not lote:
-            st.info(
-                "Sin lote abierto no hay merma. Se mide contra el peso "
-                "inicial de la tira testigo, que se carga al abrir el lote."
-            )
-        elif merma is None:
-            st.info(
-                "Sin merma: falta el peso de la tira testigo o la celda "
-                "todavía no manda dato."
-            )
-        elif merma < MERMA_MINIMA_CREIBLE:
-            st.error(
-                f"**El peso inicial de la tira está mal cargado.** En el lote "
-                f"figura {float(lote['tira_peso_inicial_g']):g} g y la celda "
-                f"marca {float(lectura['peso_tira_g']):.0f} g, así que la merma "
-                f"daría {merma:.0f} %.\n\n"
-                "**Acción:** corregilo en «Peso de la tira testigo», en la "
-                "barra lateral. No hace falta cerrar el lote."
-            )
-        else:
-            st.success(f"La tira perdió **{merma:.1f} %** de su peso inicial.")
-
-    with c4:
-        st.markdown("#### Condensación")
-        rocio = punto_de_rocio(lectura.get("temp_sala"), lectura.get("hum_sala"))
-        sup = lectura.get("temp_sup")
-        if rocio is None or sup is None:
-            st.info("Sin datos para calcular el punto de rocío.")
-        elif float(sup) <= rocio:
-            st.error(
-                f"**Riesgo:** la tripa transpira (superficie {float(sup):.1f}°C ≤ "
-                f"rocío {rocio:.1f}°C).\n\n**Acción:** bajar humedad y ventilar."
-            )
-        elif float(sup) - rocio <= MARGEN_ROCIO:
-            st.warning(
-                f"**Al borde:** a la superficie le quedan "
-                f"{float(sup) - rocio:.1f}°C para transpirar "
-                f"({float(sup):.1f}°C contra un rocío de {rocio:.1f}°C).\n\n"
-                "**Acción:** bajar la humedad ahora, antes de que moje."
-            )
-        else:
-            st.success(
-                f"✅ Sin riesgo (superficie {float(sup):.1f}°C > rocío {rocio:.1f}°C, "
-                f"{float(sup) - rocio:.1f}°C de margen)."
-            )
+    for fila in (bloques[:2], bloques[2:]):
+        for columna, (encabezado_bloque, juicio) in zip(st.columns(2), fila):
+            with columna:
+                st.markdown(f"##### {encabezado_bloque}")
+                estilo.aviso(*juicio)
 
 
 def graficos(sb, lote):
-    st.subheader("📈 Evolución")
+    st.subheader("Evolución")
 
     ventanas = ["Últimas 24 h", "Últimos 7 días"] + (["Todo el lote"] if lote else [])
     ventana = st.radio(
@@ -741,21 +744,21 @@ def graficos(sb, lote):
         columnas = [c for c in ["Temp sala", "Temp núcleo", "Temp superficie"]
                     if c in df and df[c].notna().any()]
         if columnas:
-            st.plotly_chart(
-                px.line(df, x="momento", y=columnas,
-                        labels={"value": "°C", "variable": "Sensor", "momento": ""}),
-                use_container_width=True,
-            )
+            estilo.grafico(px.line(
+                df, x="momento", y=columnas,
+                color_discrete_map=estilo.COLORES_SERIES,
+                labels={"value": "°C", "variable": "", "momento": ""},
+            ))
         else:
             st.info("Sin datos de temperatura en esta ventana.")
 
     with t2:
         if "Humedad" in df and df["Humedad"].notna().any():
-            st.plotly_chart(
-                px.line(df, x="momento", y="Humedad",
-                        labels={"Humedad": "%", "momento": ""}),
-                use_container_width=True,
-            )
+            estilo.grafico(px.line(
+                df, x="momento", y="Humedad",
+                color_discrete_sequence=[estilo.COLORES_SERIES["Humedad"]],
+                labels={"Humedad": "%", "momento": ""},
+            ))
         else:
             st.info("Sin datos de humedad en esta ventana.")
 
@@ -764,11 +767,11 @@ def graficos(sb, lote):
         # para ver si la celda esta quieta: con un peso fijo colgado la linea
         # tiene que ser plana, y cualquier deriva se ve de una.
         if "Peso tira (g)" in df and df["Peso tira (g)"].notna().any():
-            st.plotly_chart(
-                px.line(df, x="momento", y="Peso tira (g)",
-                        labels={"momento": ""}),
-                use_container_width=True,
-            )
+            estilo.grafico(px.line(
+                df, x="momento", y="Peso tira (g)",
+                color_discrete_sequence=[estilo.COLORES_SERIES["Peso tira (g)"]],
+                labels={"momento": ""},
+            ))
             st.caption(
                 "Lo que marca la celda, en crudo. Con un peso fijo colgado "
                 "la línea tiene que ser plana: si sube o baja sola, la "
@@ -792,11 +795,11 @@ def graficos(sb, lote):
             df["Merma (%)"] = (
                 (float(inicial) - df["Peso tira (g)"]) / float(inicial) * 100
             )
-            st.plotly_chart(
-                px.line(df, x="momento", y="Merma (%)",
-                        labels={"momento": ""}),
-                use_container_width=True,
-            )
+            estilo.grafico(px.line(
+                df, x="momento", y="Merma (%)",
+                color_discrete_sequence=[estilo.COLORES_SERIES["Merma (%)"]],
+                labels={"momento": ""},
+            ))
         else:
             st.info(
                 "Sin merma todavía: falta el peso inicial de la tira o la celda "
@@ -813,17 +816,97 @@ def graficos(sb, lote):
         elif filas:
             dfp = pd.DataFrame(filas)
             dfp["momento"] = pd.to_datetime(dfp["medido_en"], utc=True).dt.tz_convert(ZONA)
-            st.plotly_chart(
-                px.line(dfp, x="momento", y="ph", markers=True,
-                        labels={"ph": "pH", "momento": ""}),
-                use_container_width=True,
-            )
+            estilo.grafico(px.line(
+                dfp, x="momento", y="ph", markers=True,
+                color_discrete_sequence=[estilo.VERDE_MARCA],
+                labels={"ph": "pH", "momento": ""},
+            ))
         else:
             st.info("No hay mediciones de pH cargadas para este lote.")
 
 
+def datos_del_lote(sb, lote_id):
+    """Todo lo que necesita el informe de un lote, de una sola vez.
+
+    Las lecturas vienen de la vista por hora y no crudas: un lote de un
+    mes son 8.600 filas, y para un PDF que se lee en una pagina el
+    promedio horario cuenta la misma historia con 720 puntos.
+    """
+    filas = _paginar(
+        lambda: sb.table("lecturas_por_hora").select("*")
+        .eq("lote_id", lote_id).order("hora")
+    )
+    df = pd.DataFrame(filas)
+    if not df.empty:
+        df["momento"] = pd.to_datetime(df["hora"], utc=True).dt.tz_convert(ZONA)
+
+    return {
+        "df": df,
+        "etapas": etapas(sb, lote_id),
+        "mediciones": (
+            sb.table("mediciones").select("*").eq("lote_id", lote_id)
+            .order("medido_en").execute().data or []
+        ),
+        "alertas": (
+            sb.table("alertas").select("*").eq("lote_id", lote_id)
+            .order("inicio").execute().data or []
+        ),
+    }
+
+
+def _nombre_de_archivo(lote):
+    limpio = "".join(
+        c if c.isalnum() or c in " -_" else "-" for c in lote["nombre"]
+    ).strip().replace(" ", "-")
+    inicio = pd.to_datetime(lote["fecha_inicio"], utc=True).tz_convert(ZONA)
+    return f"{inicio.strftime('%Y-%m-%d')}-{limpio or 'lote'}.pdf"
+
+
+def descarga_de_informe(sb, lotes):
+    """Elegir un lote y bajarlo en PDF.
+
+    Son dos pasos y no uno a proposito. st.download_button necesita el
+    archivo ya armado para poder dibujarse, asi que un boton directo
+    significaria generar el PDF de TODOS los lotes en cada recarga de la
+    pagina, y la pagina se recarga sola cada minuto.
+    """
+    st.markdown("##### Descargar un informe")
+    st.caption(
+        "Un PDF con los datos del lote, los gráficos y las alertas que "
+        "saltaron, para analizarlo o mostrarlo fuera del panel."
+    )
+
+    por_nombre = {
+        f"{l['nombre']} · "
+        f"{pd.to_datetime(l['fecha_inicio'], utc=True).tz_convert(ZONA):%d/%m/%Y}": l
+        for l in lotes
+    }
+    elegido = st.selectbox("Lote", list(por_nombre), label_visibility="collapsed")
+    lote = por_nombre[elegido]
+
+    if st.button("Preparar el informe", type="primary"):
+        with st.spinner("Juntando los datos y dibujando los gráficos…"):
+            datos = datos_del_lote(sb, lote["id"])
+            st.session_state.informe = {
+                "archivo": _nombre_de_archivo(lote),
+                "pdf": informe_de_lote(
+                    lote, datos["df"], datos["etapas"],
+                    datos["mediciones"], datos["alertas"],
+                ),
+            }
+
+    listo = st.session_state.get("informe")
+    if listo:
+        st.download_button(
+            f"Descargar {listo['archivo']}",
+            data=listo["pdf"],
+            file_name=listo["archivo"],
+            mime="application/pdf",
+        )
+
+
 def historial(sb):
-    with st.expander("🗄️ Lotes anteriores"):
+    with st.expander("Lotes anteriores"):
         filas = (
             sb.table("lotes").select("*").order("fecha_inicio", desc=True)
             .limit(100).execute().data or []
@@ -831,6 +914,7 @@ def historial(sb):
         if not filas:
             st.info("Todavía no hay lotes.")
             return
+
         df = pd.DataFrame(filas)
         df["fecha_inicio"] = pd.to_datetime(df["fecha_inicio"], utc=True) \
             .dt.tz_convert(ZONA).dt.strftime("%d/%m/%Y %H:%M")
@@ -843,6 +927,9 @@ def historial(sb):
             }),
             use_container_width=True, hide_index=True,
         )
+
+        st.markdown("---")
+        descarga_de_informe(sb, filas)
 
 
 # =====================================================================

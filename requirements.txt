@@ -3,3 +3,10 @@ pandas
 supabase
 plotly
 streamlit-autorefresh
+
+# Para el PDF de los lotes. reportlab arma el documento y matplotlib
+# dibuja los graficos: plotly exporta a imagen solo con kaleido, que
+# necesita un navegador headless y es una pieza de mas que se puede
+# romper sin aviso en Streamlit Cloud.
+reportlab
+matplotlib

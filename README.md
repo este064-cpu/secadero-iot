@@ -190,10 +190,37 @@ aplicándole esa merma. El panel los muestra separados a propósito.
 **El aviso de condensación sale medio grado antes.** Si se esperara a que
 la superficie toque el punto de rocío, el mail llegaría cuando la tripa ya
 está mojada y la película ya se formó. Con 0,5 °C de margen todavía se
-llega a bajar la humedad. Ese medio grado está escrito en **tres lugares** y
-tienen que decir lo mismo: `MARGEN_ROCIO_AVISO` en `secadero.ino` (el
-`AL BORDE` del monitor serie), y `MARGEN_ROCIO` en `alertas.py` y en
-`dashboard.py`.
+llega a bajar la humedad.
+
+Ese medio grado, la fórmula del punto de rocío y el resto de los umbrales
+viven en **`cuentas.py`**, que importan el panel, los mails y el PDF. Antes
+estaban copiados en dos archivos y el día que uno cambiara, la pantalla y
+el mail iban a decir cosas distintas del mismo momento. El único que sigue
+aparte, y no hay forma de evitarlo, es el firmware: está en otro lenguaje y
+en otra máquina, así que `MARGEN_ROCIO_AVISO` de `secadero.ino` tiene que
+seguir a mano el mismo número que `MARGEN_ROCIO` de `cuentas.py`.
+
+**El panel se ve como la app de Flujo de Fondos, a propósito.** La paleta y
+las formas salen de su `Diseño y estilo.md`: fondo blanco, tarjetas con
+borde fino y esquinas redondeadas, verde `#2e6f1f` de marca, nada de tema
+oscuro. Todo eso está en `estilo.py`.
+
+Las tarjetas y los avisos son **HTML propio**, no componentes de Streamlit
+pintados con CSS. Streamlit renombra sus clases internas en cada versión:
+un `st.success` teñido por fuera se rompe solo con cualquier actualización,
+y encima sin avisar. Lo que escribimos nosotros no.
+
+**El PDF usa reportlab y matplotlib, no los gráficos de la pantalla.**
+Plotly exporta a imagen solo con kaleido, que necesita un navegador
+headless: una pieza más que se puede romper sin aviso en Streamlit Cloud.
+Matplotlib dibuja un PNG y listo. Los colores son los mismos, así que la
+línea de temperatura del informe es del mismo color que la del panel.
+
+**En el informe, cada lectura se juzga contra el rango del día que fue.**
+22 °C son perfectos en la estufa y un desastre en secado, así que las horas
+fuera de rango se cuentan etapa por etapa y nunca contra un rango único.
+Las horas sin lectura no suman: mientras el equipo estuvo callado no
+sabemos qué pasó ahí adentro, y contarlas como "en rango" sería inventarlo.
 
 **El panel muestra lo que el equipo mide ahora, haya lote o no.** Los
 sensores y la celda no saben de lotes: sirven igual para calibrar la
