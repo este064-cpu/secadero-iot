@@ -26,15 +26,31 @@ alter table etapas add column if not exists horas_reales numeric(8, 2);
 
 -- Convertir lo que ya estaba. Los dias son inclusivos de los dos lados,
 -- asi que "del 0 al 2" son tres dias: 72 horas.
-update etapas
-   set orden = sub.fila,
-       horas = (dia_hasta - dia_desde + 1) * 24
-  from (
-    select id, row_number() over (partition by lote_id order by dia_desde) as fila
-      from etapas
-  ) as sub
- where etapas.id = sub.id
-   and etapas.orden is null;
+--
+-- Va adentro de un "if" que pregunta si las columnas viejas todavia
+-- existen. Sin eso, correr este archivo una segunda vez revienta con
+-- «column "dia_desde" does not exist»: la primera corrida ya las borro.
+-- Un archivo de migracion tiene que poder correrse dos veces sin pensar.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'etapas'
+       and column_name = 'dia_desde'
+  ) then
+    update etapas
+       set orden = sub.fila,
+           horas = (dia_hasta - dia_desde + 1) * 24
+      from (
+        select id,
+               row_number() over (partition by lote_id order by dia_desde) as fila
+          from etapas
+      ) as sub
+     where etapas.id = sub.id
+       and etapas.orden is null;
+  end if;
+end $$;
 
 alter table etapas alter column orden set not null;
 alter table etapas alter column horas set not null;
