@@ -137,6 +137,21 @@ aguanta 20 horas y **sobrevive a un reinicio del equipo**, porque vive en
 la memoria RTC. No sobrevive a un corte de luz, y está bien así: si se
 corta la luz el equipo tampoco está midiendo, no hay nada que guardar.
 
+**Una lectura que la base rechaza para siempre se tira y la cola sigue.**
+Un `400` (dato mal armado) o un `409` (ya está guardada) no mejoran por
+reintentarlos: la lectura mala se quedaba adelante de todas y tapaba las
+buenas hasta 20 horas, sin que nadie se enterara. Todo lo demás sí se
+reintenta, incluso un `401`: si el token está mal no entra ninguna
+lectura, y lo correcto ahí es que salga el mail de «el equipo no manda
+datos», no tirar la cola en silencio. Cuántas se tiraron se ve en `?`,
+en **rechazadas de entrada**: si ese número no es cero, el problema es lo
+que se está midiendo, no la red.
+
+**La balanza en negativo manda `null`, no un número negativo.** Un peso
+negativo no es un peso: es la tara corrida o que no hay nada colgando. La
+base lo rechaza (`peso_tira_g >= 0`) y ese rechazo era justamente el que
+trababa la cola. El monitor serie avisa y recuerda tarar con `t`.
+
 A la media hora sin wifi se reinicia solo, que destraba la mayoría de los
 cuelgues del módulo. No pierde nada al hacerlo.
 
