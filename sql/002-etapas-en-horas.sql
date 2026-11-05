@@ -40,13 +40,20 @@ alter table etapas alter column orden set not null;
 alter table etapas alter column horas set not null;
 alter table etapas alter column horas set default 24;
 
-alter table etapas add constraint etapas_horas_positivas check (horas > 0);
-alter table etapas add constraint etapas_horas_reales_positivas
+-- Los "drop if exists" antes de cada "add" son para que esto se pueda
+-- correr dos veces sin romperse: si la primera corrida se corta por la
+-- mitad, la segunda tiene que poder terminar el trabajo.
+alter table etapas drop constraint if exists etapas_horas_positivas;
+alter table etapas add  constraint etapas_horas_positivas check (horas > 0);
+
+alter table etapas drop constraint if exists etapas_horas_reales_positivas;
+alter table etapas add  constraint etapas_horas_reales_positivas
   check (horas_reales is null or horas_reales > 0);
 
 -- El orden reemplaza al dia de arranque como identidad de la etapa.
 alter table etapas drop constraint if exists etapas_lote_id_dia_desde_key;
-alter table etapas add constraint etapas_lote_orden_unico unique (lote_id, orden);
+alter table etapas drop constraint if exists etapas_lote_orden_unico;
+alter table etapas add  constraint etapas_lote_orden_unico unique (lote_id, orden);
 
 -- Los dias ya no se usan. Se van al final, por si hay que mirar atras
 -- mientras se prueba lo nuevo.
