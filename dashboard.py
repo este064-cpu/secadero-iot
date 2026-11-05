@@ -17,6 +17,12 @@ from supabase import create_client
 ZONA = timezone(timedelta(hours=-3))  # Argentina
 TOPE_SUPABASE = 1000  # lo que devuelve Supabase por pedido, aunque no avise
 
+# Margen de aviso de condensacion: el mismo medio grado que usan el
+# firmware ("AL BORDE" en el monitor serie) y alertas.py. Si el panel
+# esperara a que la superficie toque el punto de rocio, el cartel verde
+# estaria mintiendo justo el rato en que todavia se podia hacer algo.
+MARGEN_ROCIO = 0.5
+
 st.set_page_config(page_title="Secadero IoT", layout="wide")
 
 
@@ -538,9 +544,17 @@ def diagnostico(lectura, etapa, merma, config):
                 f"**Riesgo:** la tripa transpira (superficie {float(sup):.1f}°C ≤ "
                 f"rocío {rocio:.1f}°C).\n\n**Acción:** bajar humedad y ventilar."
             )
+        elif float(sup) - rocio <= MARGEN_ROCIO:
+            st.warning(
+                f"**Al borde:** a la superficie le quedan "
+                f"{float(sup) - rocio:.1f}°C para transpirar "
+                f"({float(sup):.1f}°C contra un rocío de {rocio:.1f}°C).\n\n"
+                "**Acción:** bajar la humedad ahora, antes de que moje."
+            )
         else:
             st.success(
-                f"✅ Sin riesgo (superficie {float(sup):.1f}°C > rocío {rocio:.1f}°C)."
+                f"✅ Sin riesgo (superficie {float(sup):.1f}°C > rocío {rocio:.1f}°C, "
+                f"{float(sup) - rocio:.1f}°C de margen)."
             )
 
 

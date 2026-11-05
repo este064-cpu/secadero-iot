@@ -164,6 +164,14 @@ de ahí sale la merma real, medida. Los kilos embutidos del lote no se
 vuelven a pesar nunca: sirven para *estimar* cuánto producto queda
 aplicándole esa merma. El panel los muestra separados a propósito.
 
+**El aviso de condensación sale medio grado antes.** Si se esperara a que
+la superficie toque el punto de rocío, el mail llegaría cuando la tripa ya
+está mojada y la película ya se formó. Con 0,5 °C de margen todavía se
+llega a bajar la humedad. Ese medio grado está escrito en **tres lugares** y
+tienen que decir lo mismo: `MARGEN_ROCIO_AVISO` en `secadero.ino` (el
+`AL BORDE` del monitor serie), y `MARGEN_ROCIO` en `alertas.py` y en
+`dashboard.py`.
+
 **El panel nunca muestra un dato viejo como si fuera de ahora.** Arriba
 de todo dice hace cuánto llegó la última lectura, y se pone en rojo
 cuando pasa el tiempo configurado.

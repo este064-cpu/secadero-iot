@@ -24,6 +24,16 @@ from supabase import create_client
 
 ZONA = timezone(timedelta(hours=-3))
 
+# Cuanto puede acercarse la superficie de la tripa al punto de rocio antes
+# de que valga la pena avisar. Con 0 el mail sale cuando la tripa ya esta
+# mojada, que es tarde: para cuando uno llega, la pelicula ya esta.
+#
+# Es el mismo medio grado que usa el firmware (MARGEN_ROCIO_AVISO en
+# secadero.ino, que lo muestra como "AL BORDE" en el monitor serie). Si los
+# dos no usan el mismo numero, el equipo y el mail dicen cosas distintas
+# del mismo momento.
+MARGEN_ROCIO = 0.5
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 MAIL_USUARIO = os.environ["MAIL_USUARIO"]
@@ -257,12 +267,18 @@ def revisar_rango(lote, etapa, config, lecturas, tipo, campo, minimo, maximo,
 
 
 def revisar_rocio(lote, config, lecturas):
+    """Avisa ANTES de que la tripa transpire, no cuando ya esta mojada.
+
+    El aviso sale cuando a la superficie le queda menos de MARGEN_ROCIO
+    para llegar al punto de rocio. Medio grado de aire es poco tiempo, pero
+    alcanza para bajar la humedad y que la pelicula no llegue a formarse.
+    """
     def mal(fila):
         rocio = punto_de_rocio(fila.get("temp_sala"), fila.get("hum_sala"))
         sup = fila.get("temp_sup")
         if rocio is None or sup is None:
             return False
-        return float(sup) <= rocio
+        return float(sup) - rocio <= MARGEN_ROCIO
 
     minutos = minutos_seguidos_mal(lecturas, mal)
     tolerancia = config["tolerancia_rocio_min"]
@@ -270,10 +286,15 @@ def revisar_rocio(lote, config, lecturas):
     if minutos >= tolerancia and lecturas and mal(lecturas[0]):
         fila = lecturas[0]
         rocio = punto_de_rocio(fila["temp_sala"], fila["hum_sala"])
+        margen = float(fila["temp_sup"]) - rocio
+        como_esta = (
+            "ya está transpirando" if margen <= 0
+            else f"le quedan {margen:.1f}°C para empezar a transpirar"
+        )
         abrir_o_repetir(
             lote, "rocio", "riesgo de condensación",
             f"La superficie de la tripa está a {float(fila['temp_sup']):.1f}°C y el "
-            f"punto de rocío es {rocio:.1f}°C: está transpirando.\n\n"
+            f"punto de rocío es {rocio:.1f}°C: {como_esta}.\n\n"
             f"Lleva {int(minutos)} minutos así.\n\n"
             "Hay que bajar la humedad y ventilar para secar la película.",
             config,
