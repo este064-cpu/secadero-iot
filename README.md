@@ -118,6 +118,14 @@ luz, así que esto se hace una sola vez en la instalación.
 otra balanza. Así cualquier error sistemático se cancela: la merma sale de
 dos pesadas hechas con el mismo instrumento.
 
+**Y se lee unas horas después de colgarla, no en el momento.** La celda se
+acomoda sola los primeros minutos bajo una carga nueva (sube varios gramos
+y después baja). Un peso inicial tomado recién colgada arrastra ese error a
+la merma de todo el lote. El orden es: tarar con el gancho vacío, colgar la
+tira, esperar —de un rato largo a toda la noche—, y recién ahí cargar el
+peso desde **⚖️ Peso de la tira testigo** en la barra lateral. Se puede
+abrir el lote con el peso en 0 y completarlo después.
+
 #### Cada cuánto mide
 
 Cada 5 minutos. Son unas 8.600 lecturas por mes, que entran cómodas en el
@@ -171,6 +179,18 @@ llega a bajar la humedad. Ese medio grado está escrito en **tres lugares** y
 tienen que decir lo mismo: `MARGEN_ROCIO_AVISO` en `secadero.ino` (el
 `AL BORDE` del monitor serie), y `MARGEN_ROCIO` en `alertas.py` y en
 `dashboard.py`.
+
+**El panel muestra lo que el equipo mide ahora, haya lote o no.** Los
+sensores y la celda no saben de lotes: sirven igual para calibrar la
+balanza o para mirar la cámara vacía. Antes todo colgaba de la primera
+lectura del lote, así que sin lote abierto —o con un lote recién creado—
+la pantalla quedaba vacía y parecía que el equipo estaba muerto.
+
+**Los mails, en cambio, sí dependen del lote.** Sin lote abierto
+`alertas.py` no revisa nada, y está bien: los rangos de temperatura y
+humedad viven en las etapas del lote, así que sin lote no hay contra qué
+comparar. El panel lo dice en pantalla para que no se confunda con una
+falla.
 
 **El panel nunca muestra un dato viejo como si fuera de ahora.** Arriba
 de todo dice hace cuánto llegó la última lectura, y se pone en rojo
