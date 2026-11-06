@@ -150,6 +150,56 @@ def orden_de(etapa):
 
 
 # =====================================================================
+#  El equipo
+#
+#  Aparte de las lecturas, el ESP32 deja dos rastros en la base: el latido
+#  (cada 30 segundos, cuando pregunta si alguien pidio una medicion) y el
+#  pedido pendiente. Con el latido se puede distinguir "se quedo sin wifi"
+#  de "esta conectado pero las lecturas no entran".
+# =====================================================================
+
+# El equipo pregunta cada 30 segundos. Con 45 hay margen para el viaje.
+LO_QUE_TARDA_EN_TOMARLO = 45   # segundos
+
+
+def equipo(sb):
+    """Lo que la base sabe del equipo, aparte de las lecturas.
+
+    Las columnas se piden una por una a proposito: en esta tabla vive el
+    hash del token y no tiene por que viajar al navegador.
+    """
+    try:
+        filas = (
+            sb.table("dispositivos")
+            .select("id, nombre, ultimo_contacto, medir_pedido_en")
+            .eq("activo", True)
+            .limit(1)
+            .execute()
+            .data
+        )
+    except Exception:
+        # Sin la migracion 004 estas dos columnas no existen todavia, y el
+        # panel tiene que seguir andando igual: lo unico que se pierde es
+        # el boton.
+        return None
+    return filas[0] if filas else None
+
+
+def momento_de(equipo_, campo):
+    if not equipo_ or not equipo_.get(campo):
+        return None
+    return pd.to_datetime(equipo_[campo], utc=True).to_pydatetime()
+
+
+def pedido_sin_atender(equipo_):
+    """Segundos que lleva esperando el pedido, o None si no hay ninguno."""
+    pedido = momento_de(equipo_, "medir_pedido_en")
+    if pedido is None:
+        return None
+    return (ahora() - pedido).total_seconds()
+
+
+# =====================================================================
 #  Cuentas
 # =====================================================================
 def ahora():
@@ -198,7 +248,7 @@ def valor(lectura, campo, unidad, decimales=1):
 # =====================================================================
 #  Barra lateral
 # =====================================================================
-def peso_inicial_de_la_tira(sb, lote, lectura):
+def peso_inicial_de_la_tira(sb, lote, lectura, tolerancia=5.0):
     """Cargar o corregir el peso inicial de la tira, con el lote abierto.
 
     Tiene que poder editarse despues de abrir el lote: la tira se cuelga y
@@ -234,8 +284,24 @@ def peso_inicial_de_la_tira(sb, lote, lectura):
             "con el peso de la otra balanza. Esto es para corregirlo si algo "
             "salió mal."
         )
-        if referencia:
-            st.caption(f"En la otra balanza pesó **{float(referencia):g} g**.")
+
+        # El peso de control se sabe justo antes de colgar la tira, que suele
+        # ser despues de haber abierto el lote. Si solo se pudiera cargar al
+        # crearlo, el control no se usaria nunca.
+        with st.form("peso_referencia"):
+            ref = st.number_input(
+                "Lo que pesó en la otra balanza (g)",
+                min_value=0.0, step=10.0,
+                value=float(referencia) if referencia else 0.0,
+                help="El peso de control, tomado antes de colgarla. No entra "
+                     "en la merma: sirve para que el sistema avise si la "
+                     "celda quedó mal.",
+            )
+            if st.form_submit_button("Guardar el de control"):
+                guardar_referencia(sb, lote, ref)
+
+        if actual and referencia:
+            st.caption(comparacion_de_balanzas(actual, referencia, tolerancia))
 
         marca = lectura.get("peso_tira_g") if lectura else None
 
@@ -254,6 +320,39 @@ def peso_inicial_de_la_tira(sb, lote, lectura):
                 guardar_peso_tira(sb, lote, nuevo)
 
 
+def comparacion_de_balanzas(celda, referencia, tolerancia):
+    """Que tan de acuerdo estan las dos balanzas.
+
+    No dice "corregí el peso inicial con el de la otra balanza", aunque sea
+    lo que uno haria de primera. La merma se calcula con la MISMA celda en
+    los dos extremos, asi que un error parejo de la celda se cancela solo;
+    mezclar el peso de una balanza con las lecturas de la otra mete un error
+    que antes no estaba. El peso de control sirve para enterarse de que la
+    celda esta mal, no para reemplazar su numero.
+    """
+    celda, referencia = float(celda), float(referencia)
+    diferencia = abs(celda - referencia) / referencia * 100
+
+    if diferencia <= float(tolerancia):
+        return (f"Las dos balanzas coinciden: {celda:g} g contra "
+                f"{referencia:g} g, {diferencia:.1f} % de diferencia.")
+
+    return (f"⚠️ La celda tomó **{celda:g} g** y la otra balanza "
+            f"**{referencia:g} g**: {diferencia:.1f} % de diferencia. "
+            "La merma igual se calcula con la celda en los dos extremos, "
+            "así que un error parejo se cancela; lo que hay que arreglar es "
+            "la celda, no este número.")
+
+
+def guardar_referencia(sb, lote, gramos):
+    sb.table("lotes").update({
+        "tira_peso_referencia_g": gramos if gramos > 0 else None,
+    }).eq("id", lote["id"]).execute()
+    st.success(f"Peso de control: {gramos:g} g" if gramos > 0
+               else "Peso de control borrado.")
+    st.rerun()
+
+
 def guardar_peso_tira(sb, lote, gramos):
     # La base exige > 0; un cero se guarda como null, que es "todavia no se
     # sabe" y no un peso de cero gramos.
@@ -266,7 +365,7 @@ def guardar_peso_tira(sb, lote, gramos):
     st.rerun()
 
 
-def barra_lateral(sb, lote, lista_etapas, lectura=None):
+def barra_lateral(sb, lote, lista_etapas, lectura=None, tolerancia=5.0):
     with st.sidebar:
         st.caption(st.session_state.usuario)
         if st.button("Salir"):
@@ -287,7 +386,7 @@ def barra_lateral(sb, lote, lista_etapas, lectura=None):
             if lote.get("kg_embutidos"):
                 st.caption(f"Embutido: {float(lote['kg_embutidos']):.0f} kg")
 
-            peso_inicial_de_la_tira(sb, lote, lectura)
+            peso_inicial_de_la_tira(sb, lote, lectura, tolerancia)
 
             if st.button("Finalizar lote"):
                 sb.table("lotes").update(
@@ -635,7 +734,80 @@ def editor_config(sb):
 # =====================================================================
 #  Panel
 # =====================================================================
-def encabezado(lote, etapa, lectura, config, del_lote):
+def por_que_esta_callado(equipo_):
+    """La parte que faltaba cuando el equipo se queda mudo.
+
+    Un silencio en las lecturas tiene dos causas muy distintas y hasta
+    ahora se veian iguales: que el equipo no llegue a la base, o que
+    llegue y las lecturas no entren (la base las rechaza, o la cola quedo
+    trabada). El latido las separa.
+    """
+    if equipo_ is None:
+        # O no hay equipo dado de alta, o la base todavia no tiene la
+        # migracion 004. En los dos casos no hay latido que mirar, y no
+        # corresponde afirmar nada sobre el.
+        return "Puede ser el wifi, la corriente o el equipo colgado."
+
+    contacto = momento_de(equipo_, "ultimo_contacto")
+
+    if contacto is None:
+        return ("Puede ser el wifi, la corriente o el equipo colgado. "
+                "Tampoco dejó constancia de estar vivo, ni una vez.")
+
+    if (ahora() - contacto).total_seconds() <= 120:
+        return (f"Ojo: el equipo habló con la base {texto_antiguedad(contacto)}, "
+                "así que de red y de corriente está bien. El problema está en "
+                "las lecturas: o la base las rechaza, o la cola quedó trabada. "
+                "Conectar el USB y mirar el monitor serie con «?».")
+
+    return (f"El equipo tampoco da señales de vida {texto_antiguedad(contacto)}: "
+            "es el wifi, la corriente, o que quedó colgado.")
+
+
+def boton_de_medir(sb, equipo_):
+    """El boton que saltea la espera de los 5 minutos.
+
+    El panel no puede golpearle la puerta al equipo: esta adentro de la
+    fabrica, detras del router. Asi que deja el pedido anotado en la base
+    y el equipo lo levanta la proxima vez que pregunta, cada 30 segundos.
+    """
+    if equipo_ is None:
+        return
+
+    texto, boton = st.columns([4, 1])
+
+    with boton:
+        apretado = st.button(
+            "Medir ahora", use_container_width=True,
+            help="Le pide una lectura al equipo sin esperar los 5 minutos. "
+                 "Tarda hasta medio minuto en llegar.",
+        )
+
+    if apretado:
+        try:
+            sb.rpc("pedir_medicion", {}).execute()
+        except Exception as e:
+            st.error(f"No se pudo dejar el pedido: {e}")
+            return
+        st.rerun()
+
+    espera = pedido_sin_atender(equipo_)
+    if espera is None:
+        return
+
+    with texto:
+        if espera <= LO_QUE_TARDA_EN_TOMARLO:
+            st.caption("Pedido anotado. El equipo lo levanta en los próximos "
+                       "30 segundos y la lectura aparece sola.")
+        else:
+            cuanto = (f"{int(espera)} segundos" if espera < 120
+                      else f"{int(espera // 60)} minutos")
+            st.caption(f"⚠️ El pedido lleva {cuanto} sin que el equipo lo "
+                       "levante, así que no está preguntando: o no llega a "
+                       "la base, o todavía tiene el firmware viejo.")
+
+
+def encabezado(lote, etapa, lectura, config, del_lote, equipo_=None):
     """Arriba de todo: que tan fresco es el dato y de donde sale.
 
     "del_lote" dice si la lectura que se esta mostrando cayo adentro del
@@ -665,7 +837,7 @@ def encabezado(lote, etapa, lectura, config, del_lote):
             "mal", f"El equipo no manda datos {texto_antiguedad(medido)}.",
             f"La última lectura es del {cuando}. Todo lo que se ve abajo es "
             "esa foto vieja, no el secadero de ahora.",
-            "Puede ser el wifi, la corriente o el equipo colgado.",
+            por_que_esta_callado(equipo_),
         )
     else:
         color = estilo.VERDE if minutos <= 15 else estilo.AMBAR
@@ -1125,7 +1297,13 @@ def main():
         pantalla_login(sb)
         return
 
-    st_autorefresh(interval=60000, key="recarga")
+    # Mientras hay un pedido de medicion recien hecho conviene mirar mas
+    # seguido, para que la lectura aparezca sola apenas llega en vez de
+    # esperar hasta un minuto.
+    equipo_ = equipo(sb)
+    espera = pedido_sin_atender(equipo_)
+    apurado = espera is not None and espera <= LO_QUE_TARDA_EN_TOMARLO
+    st_autorefresh(interval=5000 if apurado else 60000, key="recarga")
 
     lote = lote_activo(sb)
     lista_etapas = etapas(sb, lote["id"]) if lote else []
@@ -1143,9 +1321,11 @@ def main():
 
     # Despues de la lectura: la barra lateral la usa para ofrecer el peso que
     # marca la balanza en este momento.
-    barra_lateral(sb, lote, lista_etapas, lectura)
+    barra_lateral(sb, lote, lista_etapas, lectura,
+                  config.get("tolerancia_peso_pct", 5))
 
-    encabezado(lote, etapa, lectura, config, del_lote)
+    encabezado(lote, etapa, lectura, config, del_lote, equipo_)
+    boton_de_medir(sb, equipo_)
 
     if lectura:
         st.markdown("---")

@@ -29,6 +29,7 @@ que aplicar las migraciones que falten, en orden, que no borran nada.
 |---|---|
 | `sql/002-etapas-en-horas.sql` | Pasa las etapas de días fijos a duraciones. Convierte solo las que ya existan. |
 | `sql/003-peso-inicial-automatico.sql` | Agrega el peso de control de la otra balanza y los tiempos de la toma automática. |
+| `sql/004-medir-ahora.sql` | El botón «Medir ahora» del panel y el latido del equipo. Hasta que no se corra, el botón no aparece. |
 
 > La carpeta se llama `sql/` y no `supabase/` a propósito: una carpeta
 > llamada igual que la librería la tapa al importarla y el panel no
@@ -117,7 +118,7 @@ número. Por el monitor serie a 115200 acepta tres órdenes:
 |---|---|
 | `t` | Tara. Con el gancho vacío, sin la tira. |
 | `c500` | Calibra con 500 g colgando (o los gramos que sean). |
-| `?` | Dice cómo está: wifi, hora, sensores, peso actual, cola. |
+| `?` | Dice cómo está: wifi, hora, sensores, peso actual, cola, y si la base le contesta. |
 
 Los dos números quedan guardados en el ESP32 y sobreviven a los cortes de
 luz, así que esto se hace una sola vez en la instalación.
@@ -141,11 +142,26 @@ Dos horas alcanzan para que se asiente y son pocas para que la tira haya
 perdido algo que importe. Se cambia desde el panel, en **Avisos por mail**.
 
 **Y se controla contra otra balanza.** Antes de colgar la tira se la pesa
-aparte y ese número se carga al crear el lote. Cuando el sistema toma el
-suyo, compara: si difieren más del 5 %, sale un mail. Una balanza sola no
-se puede controlar a sí misma — si la celda quedó mal tarada, el número
-que da parece perfectamente razonable y la merma del lote entero sale
-corrida sin que nadie lo note.
+aparte y ese número se carga al crear el lote — o después, con el lote ya
+abierto, en la barra lateral: casi siempre la tira se pesa justo antes de
+colgarla, que es más tarde que el momento de crear el lote. Cuando el
+sistema toma el suyo, compara: si difieren más del 5 %, sale un mail. Una
+balanza sola no se puede controlar a sí misma — si la celda quedó mal
+tarada, el número que da parece perfectamente razonable y la merma del
+lote entero sale corrida sin que nadie lo note.
+
+**Ese peso de control no reemplaza al de la celda, aunque sea lo que uno
+haría de primera.** La merma se calcula con la *misma* celda en los dos
+extremos, así que un error parejo de la celda se cancela solo: si lee 5 %
+de menos siempre, la merma sale exacta igual. Cargar a mano el peso de la
+otra balanza como peso inicial mezcla las dos escalas y mete un error que
+antes no estaba — con una tira de 1190 g reales que baja a 1000, la merma
+verdadera es 16,0 %, la celda sola da 16,0 %, y mezclando da 20,5 %.
+
+Sí conviene corregirlo a mano cuando la celda dio un disparate puntual
+justo en el momento de la toma. La diferencia entre las dos balanzas es
+para enterarse de que la celda está mal y arreglarla, no para tapar el
+número.
 
 Si la celda no manda **ningún** peso en esas dos horas, también sale un
 mail. Un silencio ahí es un lote sin merma.
@@ -154,8 +170,8 @@ El orden de trabajo queda así:
 
 1. Tarar con el gancho vacío (`t` por el monitor serie).
 2. Pesar la tira en otra balanza y anotar ese número.
-3. Crear el lote en el panel con ese peso en **Peso de la tira en la otra
-   balanza**.
+3. Cargar ese peso en **Peso de la tira en la otra balanza**, al crear el
+   lote o después, en la barra lateral.
 4. Colgar la tira. Listo, no hay nada más que hacer.
 
 #### Cada cuánto mide
@@ -186,6 +202,40 @@ trababa la cola. El monitor serie avisa y recuerda tarar con `t`.
 
 A la media hora sin wifi se reinicia solo, que destraba la mayoría de los
 cuelgues del módulo. No pierde nada al hacerlo.
+
+#### «Medir ahora» y el latido
+
+Los 5 minutos se pueden saltear: el botón **Medir ahora**, arriba en el
+panel, pide una lectura al instante. Tarda hasta medio minuto en llegar.
+
+El panel no le puede golpear la puerta al equipo — está adentro de la
+fábrica, detrás del router, sin IP a la que llamar. Así que va al revés:
+el panel deja el pedido anotado en `dispositivos.medir_pedido_en` y el
+equipo lo levanta la próxima vez que pregunta, cada 30 segundos. La
+función de la base le entrega el pedido y lo borra en el mismo
+movimiento, así que el equipo no tiene que recordar nada entre reinicios
+y una medición pedida una vez no se hace dos. Mientras el pedido está
+fresco el panel se recarga cada 5 segundos en vez de cada 60, para que la
+lectura aparezca sola.
+
+**Esa pregunta cada 30 segundos vale más que el botón: es el latido.** Un
+silencio en las lecturas tenía hasta ahora dos causas que se veían
+exactamente iguales:
+
+- el equipo no llega a la base — wifi, corriente, colgado;
+- el equipo llega perfecto y las lecturas no entran — la base las rechaza
+  o la cola quedó trabada.
+
+La primera se arregla yendo a la fábrica; la segunda, no. Como el latido
+no depende de que ninguna lectura sea válida, ahora el panel y el mail
+dicen cuál de las dos es. Si el aviso de «el equipo no manda datos» dice
+que **igual habló con la base hace un minuto**, el wifi no tiene nada que
+ver: hay que mirar el monitor serie con `?` y las **rechazadas de
+entrada**.
+
+Y si el botón queda con el pedido sin atender más de 45 segundos, eso
+también es un diagnóstico: el equipo no está preguntando, o porque no
+llega a la base o porque todavía tiene el firmware viejo.
 
 El equipo manda cada lectura con un POST a:
 

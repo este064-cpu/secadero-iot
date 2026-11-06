@@ -179,7 +179,15 @@ create table dispositivos (
   token_hash     text not null,
   activo         boolean not null default true,
   ultima_lectura timestamptz,
-  creado_en      timestamptz not null default now()
+  creado_en      timestamptz not null default now(),
+
+  -- Cuando alguien apreto "Medir ahora" en el panel. El equipo lo consume
+  -- y lo deja en null.
+  medir_pedido_en timestamptz,
+
+  -- Ultima vez que el equipo pregunto algo. Es el latido: dice que esta
+  -- vivo y con internet, aunque no logre guardar una sola lectura.
+  ultimo_contacto timestamptz
 );
 
 -- ---------------------------------------------------------------------
@@ -304,6 +312,72 @@ grant execute on function registrar_lectura to anon, authenticated;
 --           encode(digest('PEGAR-ACA-UN-TOKEN-LARGO', 'sha256'), 'hex'));
 --
 -- Ese token va en el firmware. En la base no queda guardado en claro.
+
+-- ---------------------------------------------------------------------
+--  8b. "Medir ahora", y el latido.
+--
+--  El equipo esta detras del router de la fabrica: el panel no lo puede
+--  llamar. Asi que el equipo pregunta cada 30 segundos si alguien pidio
+--  una medicion, y de paso deja constancia de que esta vivo.
+--
+--  Ese latido es lo que permite distinguir dos problemas que antes se
+--  veian iguales: "se quedo sin wifi" y "esta conectado pero las lecturas
+--  no entran".
+-- ---------------------------------------------------------------------
+create or replace function tomar_pedido(p_token text)
+returns timestamptz
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_dispositivo smallint;
+  v_pedido      timestamptz;
+begin
+  select id, medir_pedido_en
+    into v_dispositivo, v_pedido
+    from dispositivos
+   where activo
+     and token_hash = encode(digest(p_token, 'sha256'), 'hex')
+     for update;
+
+  if v_dispositivo is null then
+    raise exception 'Token invalido';
+  end if;
+
+  -- Se borra el pedido en el mismo movimiento en que se lo entrega, para
+  -- que una medicion pedida una vez no se haga dos.
+  update dispositivos
+     set ultimo_contacto = now(),
+         medir_pedido_en = null
+   where id = v_dispositivo;
+
+  return v_pedido;
+end;
+$$;
+
+revoke all on function tomar_pedido from public;
+grant execute on function tomar_pedido to anon, authenticated;
+
+-- El boton del panel. Nadie tiene permiso de update sobre dispositivos
+-- (ahi vive el hash del token), asi que esta es la unica forma de anotar
+-- el pedido, y solo la puede llamar alguien logueado.
+create or replace function pedir_medicion()
+returns timestamptz
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_ahora timestamptz := now();
+begin
+  update dispositivos set medir_pedido_en = v_ahora where activo;
+  return v_ahora;
+end;
+$$;
+
+revoke all on function pedir_medicion from public;
+grant execute on function pedir_medicion to authenticated;
 
 -- ---------------------------------------------------------------------
 --  9. Vista por hora — para los graficos largos.

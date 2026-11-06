@@ -211,11 +211,15 @@ def controlar_contra_la_otra_balanza(lote, config, peso):
         f"La celda tomó {peso:.1f} g como peso inicial de la tira, pero en la "
         f"otra balanza había pesado {referencia:.1f} g: "
         f"{diferencia:.1f} % de diferencia.\n\n"
-        "Alguna de las dos está mal. Mientras no se resuelva, la merma de "
-        "este lote va a salir corrida.\n\n"
-        "Lo más probable es que la celda haya quedado mal tarada. Se corrige "
-        "cargando el peso bueno a mano desde el panel, en «Peso de la tira "
-        "testigo».",
+        "Alguna de las dos está mal, y lo más probable es que sea la celda: "
+        "mal tarada, mal calibrada o mal montada.\n\n"
+        "Lo que hay que arreglar es la celda, no este número. La merma se "
+        "calcula con la MISMA celda en los dos extremos, así que un error "
+        "parejo se cancela solo; cargar a mano el peso de la otra balanza "
+        "mezcla las dos escalas y mete un error que antes no estaba.\n\n"
+        "Sí conviene corregirlo a mano si la celda dio un disparate puntual "
+        "justo en el momento de la toma. Se hace desde el panel, en «Peso de "
+        "la tira testigo».",
         config,
     )
 
@@ -241,6 +245,42 @@ def minutos_seguidos_mal(lecturas, esta_mal):
 # =====================================================================
 #  Revision
 # =====================================================================
+def por_que_esta_callado():
+    """Por que no llegan lecturas, si se puede saber.
+
+    El equipo le pregunta a la base cada 30 segundos si alguien pidio una
+    medicion, y eso deja un latido. Si el latido esta fresco y las lecturas
+    igual no entran, el wifi no tiene nada que ver: o la base las rechaza,
+    o la cola quedo trabada. Son dos problemas distintos y el mail tiene
+    que decir cual es, porque la respuesta es ir a la fabrica o no.
+    """
+    generico = "Puede ser el wifi, la corriente o el equipo colgado."
+    try:
+        filas = (
+            sb.table("dispositivos").select("ultimo_contacto")
+            .eq("activo", True).limit(1).execute().data
+        )
+    except Exception:
+        # Sin la migracion 004 no hay latido que mirar.
+        return generico
+
+    if not filas or not filas[0].get("ultimo_contacto"):
+        return generico
+
+    contacto = datetime.fromisoformat(filas[0]["ultimo_contacto"])
+    minutos = (datetime.now(timezone.utc) - contacto).total_seconds() / 60
+
+    if minutos <= 5:
+        return (f"OJO: el equipo sigue hablando con la base (hace "
+                f"{int(minutos)} min), asi que de wifi y de corriente esta "
+                "bien. El problema esta en las lecturas: o la base las "
+                "rechaza, o la cola quedo trabada. Se ve conectando el USB "
+                "y escribiendo «?» en el monitor serie.")
+
+    return (f"Tampoco da senales de vida desde hace {int(minutos)} minutos: "
+            "es el wifi, la corriente, o que quedo colgado.")
+
+
 def revisar():
     config = sb.table("config").select("*").limit(1).execute().data[0]
 
@@ -276,7 +316,7 @@ def revisar():
             f"Hace {int(silencio)} minutos que no llega ninguna lectura. "
             f"La última fue a las {medido.astimezone(ZONA).strftime('%H:%M')} "
             f"del {medido.astimezone(ZONA).strftime('%d/%m')}.\n\n"
-            "Puede ser el wifi, la corriente o el equipo colgado. "
+            f"{por_que_esta_callado()}\n\n"
             "Mientras tanto el secadero está sin vigilancia.",
             config,
         )
